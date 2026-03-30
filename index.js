@@ -1,5 +1,5 @@
 const net = require("net");
-const config = require("../config/config");
+const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
 const CommandHandler = require("./handlers/CommandHandler");
 const Logger = require("./utils/Logger");
