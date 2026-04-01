@@ -40,13 +40,12 @@ const logger = new Logger();
 
 class GrowtopiaProxy {
   constructor() {
-    this.sessions = new Map();    // clientId -> { clientPeer, serverHost, serverPeer }
+    this.sessions = new Map();    // clientId -> { clientPeer, serverHost, serverPeer, pendingServer }
     this.peerToClient = new Map(); // peer pointer -> clientId
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
     this.proxyHost = null;
     this.loginServer = null;       // set after construction
-    this.pendingServer = null;     // for sub-server redirects (OnSendToServer)
   }
 
   start() {
@@ -74,17 +73,23 @@ class GrowtopiaProxy {
         );
 
         // Incoming client connection
-        host.on("connect", (clientPeer, data, outgoing) => {
-          if (outgoing) return; // Ignore our own outgoing connections
-
+        host.on("connect", (clientPeer) => {
           const clientId = this.generateClientId();
           logger.info(`[CLIENT] New ENet connection: ${clientId}`);
 
           this.peerToClient.set(clientPeer._pointer, clientId);
-          this.sessions.set(clientId, { clientPeer, serverHost: null, serverPeer: null });
+          this.sessions.set(clientId, { clientPeer, serverHost: null, serverPeer: null, pendingServer: null });
 
           // Create a separate ENet client host to connect to the real GT server
           this.connectToServer(clientId);
+        });
+
+        // Client disconnected
+        host.on("disconnect", (clientPeer) => {
+          const clientId = this.peerToClient.get(clientPeer._pointer);
+          if (!clientId) return;
+          logger.info(`[CLIENT] Disconnected: ${clientId}`);
+          this.cleanup(clientId);
         });
 
         // Incoming data from a client
@@ -126,10 +131,10 @@ class GrowtopiaProxy {
 
     // Use pending sub-server redirect, then login response, then static config.
     let serverHost, serverPort;
-    if (this.pendingServer) {
-      serverHost = this.pendingServer.host;
-      serverPort = this.pendingServer.port;
-      this.pendingServer = null; // consume it
+    if (session.pendingServer) {
+      serverHost = session.pendingServer.host;
+      serverPort = session.pendingServer.port;
+      session.pendingServer = null; // consume it
     } else if (this.loginServer && this.loginServer.realServerHost) {
       serverHost = this.loginServer.realServerHost;
       serverPort = this.loginServer.realServerPort;
@@ -207,18 +212,8 @@ class GrowtopiaProxy {
         });
 
         // Server disconnected
-        host.on("connect", (peer, data, outgoing) => {
-          if (outgoing) {
-            // Our connection to the server succeeded (already handled in connect callback)
-          }
-        });
-
         serverPeer.on("disconnect", () => {
           logger.info(`[${clientId}] GT server disconnected`);
-          // Disconnect the client too
-          if (session.clientPeer) {
-            session.clientPeer.disconnectLater(0);
-          }
           this.cleanup(clientId);
         });
 
@@ -286,34 +281,17 @@ class GrowtopiaProxy {
                     offset += strLen;
 
                     if (funcName === "OnSendToServer") {
-                      // Parse remaining variants to get port, token, user, address
-                      // variant[1] = int32 (port), variant[2] = int32 (token),
-                      // variant[3] = int32 (user), variant[4] = string (ip|doorId|uuid)
+                      // Parse all variants: [0]=funcName, [1]=port, [2]=token, [3]=user, [4]=address
                       logger.info(`[${clientId}] Intercepted OnSendToServer`);
 
-                      // Read variant[1] - port (int32, type 9)
                       let realPort = 17091;
-                      if (offset + 2 <= extraData.length) {
-                        const idx1 = extraData.readUInt8(offset); offset += 1;
-                        const type1 = extraData.readUInt8(offset); offset += 1;
-                        if (type1 === 9 && offset + 4 <= extraData.length) {
-                          realPort = extraData.readInt32LE(offset);
-                        } else if (type1 === 5 && offset + 4 <= extraData.length) {
-                          realPort = extraData.readUInt32LE(offset);
-                        }
-                      }
-
-                      // We need to find the address string (variant[4])
-                      // For now, just log and rewrite the whole packet
-                      // The address is typically in variant[4] as "IP|doorId|uuid"
-                      // We'll rewrite the server+port in the response
-
-                      // Store pending address for ENet reconnection
-                      // Parse variant[4] for the real IP
+                      let realToken = 0;
+                      let realUser = 0;
                       let realAddress = null;
+                      let addressFull = "127.0.0.1|0|";
+
                       try {
-                        // Re-parse all variants to find variant[4]
-                        let off2 = 1; // skip count
+                        let off2 = 1; // skip variant count byte
                         for (let vi = 0; vi < varCount && off2 < extraData.length; vi++) {
                           const vIdx = extraData.readUInt8(off2); off2 += 1;
                           const vType = extraData.readUInt8(off2); off2 += 1;
@@ -321,32 +299,50 @@ class GrowtopiaProxy {
                           else if (vType === 2) { // string
                             const sLen = extraData.readUInt32LE(off2); off2 += 4;
                             if (vIdx === 4) {
-                              const addrStr = extraData.toString("utf8", off2, off2 + sLen);
-                              realAddress = addrStr.split("|")[0]; // "IP|doorId|uuid" → IP
+                              addressFull = extraData.toString("utf8", off2, off2 + sLen);
+                              realAddress = addressFull.split("|")[0]; // "IP|doorId|uuid" → IP
                             }
                             off2 += sLen;
                           }
                           else if (vType === 3) { off2 += 8; } // vec2
                           else if (vType === 4) { off2 += 12; } // vec3
-                          else if (vType === 5 || vType === 9) { off2 += 4; } // uint/int
+                          else if (vType === 5) {
+                            if (vIdx === 1) realPort = extraData.readUInt32LE(off2);
+                            else if (vIdx === 2) realToken = extraData.readUInt32LE(off2);
+                            else if (vIdx === 3) realUser = extraData.readUInt32LE(off2);
+                            off2 += 4;
+                          }
+                          else if (vType === 9) {
+                            if (vIdx === 1) realPort = extraData.readInt32LE(off2);
+                            else if (vIdx === 2) realToken = extraData.readInt32LE(off2);
+                            else if (vIdx === 3) realUser = extraData.readInt32LE(off2);
+                            off2 += 4;
+                          }
                         }
-                      } catch (e) { /* parsing error, skip */ }
+                      } catch (e) { /* parsing error, use defaults */ }
 
                       if (realAddress) {
-                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
-                        // Store for the next connectToServer call
-                        this.pendingServer = { host: realAddress, port: realPort };
+                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort} (token=${realToken}, user=${realUser})`);
+                        // Store per-session for the next connectToServer call
+                        const session = this.sessions.get(clientId);
+                        if (session) {
+                          session.pendingServer = { host: realAddress, port: realPort };
+                        }
                       }
 
-                      // Rewrite the packet: change port to our proxy port
-                      // and address to 127.0.0.1
+                      // Rewrite: redirect client to our proxy, but preserve token + user
                       const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
+                      // Replace only the IP in the address string, keep doorId and uuid
+                      const addrParts = addressFull.split("|");
+                      addrParts[0] = proxyHost;
+                      const rewrittenAddr = addrParts.join("|");
+
                       modifiedData = PacketHandler.buildVariantPacket([
                         { type: 2, value: "OnSendToServer" },
                         { type: 9, value: config.proxy.port },     // port → proxy
-                        { type: 9, value: 0 },                      // token (will be sent fresh)
-                        { type: 9, value: 0 },                      // user
-                        { type: 2, value: `${proxyHost}|0|` },      // address → proxy
+                        { type: 9, value: realToken },              // preserve real token
+                        { type: 9, value: realUser },               // preserve real user
+                        { type: 2, value: rewrittenAddr },          // address → proxy, keep doorId/uuid
                       ], -1, 0);
 
                       return modifiedData;

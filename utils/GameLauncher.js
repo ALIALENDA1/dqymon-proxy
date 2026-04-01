@@ -136,11 +136,11 @@ class GameLauncher {
    */
   addFirewallRules() {
     if (process.platform !== "win32") return;
-    const ports = [80, 443, 8080, 17091];
-    for (const port of ports) {
+    // TCP rules for HTTP/HTTPS login server ports
+    for (const port of [80, 443, 8080]) {
       try {
         execSync(
-          `netsh advfirewall firewall add rule name="dqymon-proxy-${port}" ` +
+          `netsh advfirewall firewall add rule name="dqymon-proxy-tcp-${port}" ` +
           `dir=in action=allow protocol=TCP localport=${port} >nul 2>&1`,
           { stdio: "pipe" }
         );
@@ -148,7 +148,17 @@ class GameLauncher {
         // Rule may already exist — that's fine
       }
     }
-    this.logger.info("✓ Firewall rules added for ports 80, 443, 8080, 17091");
+    // UDP rule for ENet proxy port (ENet uses UDP, not TCP)
+    try {
+      execSync(
+        `netsh advfirewall firewall add rule name="dqymon-proxy-udp-17091" ` +
+        `dir=in action=allow protocol=UDP localport=${config.proxy.port} >nul 2>&1`,
+        { stdio: "pipe" }
+      );
+    } catch {
+      // Rule may already exist
+    }
+    this.logger.info(`✓ Firewall rules added (TCP: 80,443,8080 | UDP: ${config.proxy.port})`);
   }
 
   /**
