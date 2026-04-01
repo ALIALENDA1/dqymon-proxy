@@ -1,26 +1,32 @@
-// ── Keep the window open on any crash ──────────────────────────────────
-function waitForKey(msg) {
-  return new Promise((resolve) => {
-    if (!process.stdin.isTTY) return resolve();
-    process.stdout.write(msg);
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.once("data", () => resolve());
-  });
+// ── Synchronous "pause" so the console window never closes silently ───
+const readline = require("readline");
+
+function pauseBeforeExit(msg) {
+  try {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve) => {
+      rl.question(msg, () => { rl.close(); resolve(); });
+    });
+  } catch {
+    // If stdin isn't available, just wait 30 seconds
+    return new Promise((resolve) => setTimeout(resolve, 30000));
+  }
 }
 
 process.on("uncaughtException", async (err) => {
   console.error(`\n[FATAL] ${err.message}\n${err.stack}`);
-  await waitForKey("\nPress any key to exit...");
+  await pauseBeforeExit("\nPress ENTER to exit...");
   process.exit(1);
 });
 
 process.on("unhandledRejection", async (err) => {
   console.error(`\n[FATAL] Unhandled rejection: ${err}`);
-  await waitForKey("\nPress any key to exit...");
+  await pauseBeforeExit("\nPress ENTER to exit...");
   process.exit(1);
 });
 // ────────────────────────────────────────────────────────────────────────
+
+try {
 
 const enet = require("enet");
 const config = require("./config/config");
@@ -310,4 +316,10 @@ if (config.game && config.game.autoLaunch !== false) {
 logger.info("Proxy is running. Press Ctrl+C to stop.");
 if (process.stdin.isTTY) {
   process.stdin.resume();
+}
+
+} catch (err) {
+  // This catches require() failures and any synchronous startup errors
+  console.error(`\n[FATAL] Startup failed: ${err.message}\n${err.stack}`);
+  pauseBeforeExit("\nPress ENTER to exit...").then(() => process.exit(1));
 }
