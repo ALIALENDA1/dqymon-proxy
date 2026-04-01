@@ -439,6 +439,7 @@ proxy.loginServer = loginServer;
 
 // Restore hosts file on any exit
 function cleanup() {
+  loginServer.removeCert();
   gameLauncher.cleanup();
   loginServer.stop();
 }
@@ -467,6 +468,8 @@ if (config.game && config.game.modifyHosts !== false) {
     gameLauncher.flushDns();
     // Add firewall rules so Windows doesn't block our ports
     gameLauncher.addFirewallRules();
+    // Install our cert so GT's auth client trusts our HTTPS interception
+    loginServer.installCert();
   }
 }
 

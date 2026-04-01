@@ -1,6 +1,10 @@
 const https = require("https");
 const http = require("http");
 const net = require("net");
+const { execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 const config = require("../config/config");
 const Logger = require("./Logger");
 
@@ -62,6 +66,7 @@ class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.servers = [];
+    this.certInstalled = false;
     // The real GT server address/port extracted from the login response.
     // index.js reads these to know where to connect via ENet.
     this.realServerHost = null;
@@ -457,6 +462,51 @@ class LoginServer {
         resolve(results);
       });
     });
+  }
+
+  /**
+   * Install the proxy's self-signed certificate into the Windows
+   * Trusted Root Certification Authorities store.  This makes GT's
+   * auth client (WinHTTP/SChannel) trust our HTTPS interception.
+   * Requires Administrator privileges.
+   */
+  installCert() {
+    if (process.platform !== "win32") return true;
+    try {
+      // Remove any leftover cert from a previous crashed run
+      this.removeCert();
+
+      const tmpCert = path.join(os.tmpdir(), "dqymon-proxy-cert.pem");
+      fs.writeFileSync(tmpCert, EMBEDDED_CERT);
+      execSync(`certutil -addstore -f Root "${tmpCert}"`, { stdio: "pipe" });
+      try { fs.unlinkSync(tmpCert); } catch {}
+      this.certInstalled = true;
+      this.logger.info("✓ Proxy certificate installed in Windows trusted root store");
+      return true;
+    } catch (err) {
+      this.logger.warn(`Could not install certificate (need admin?): ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Remove the proxy certificate from the Windows trust store.
+   */
+  removeCert() {
+    if (process.platform !== "win32") return;
+    try {
+      // Remove by subject matching our CN (www.growtopia1.com)
+      execSync(
+        'powershell -Command "Get-ChildItem Cert:\\LocalMachine\\Root | ' +
+        "Where-Object { $_.Subject -match 'growtopia' } | " +
+        'Remove-Item -Force"',
+        { stdio: "pipe" }
+      );
+      this.certInstalled = false;
+      this.logger.info("✓ Proxy certificate removed from trust store");
+    } catch {
+      // May not exist — that's fine
+    }
   }
 
   stop() {
