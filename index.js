@@ -1,3 +1,27 @@
+// ── Keep the window open on any crash ──────────────────────────────────
+function waitForKey(msg) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) return resolve();
+    process.stdout.write(msg);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.once("data", () => resolve());
+  });
+}
+
+process.on("uncaughtException", async (err) => {
+  console.error(`\n[FATAL] ${err.message}\n${err.stack}`);
+  await waitForKey("\nPress any key to exit...");
+  process.exit(1);
+});
+
+process.on("unhandledRejection", async (err) => {
+  console.error(`\n[FATAL] Unhandled rejection: ${err}`);
+  await waitForKey("\nPress any key to exit...");
+  process.exit(1);
+});
+// ────────────────────────────────────────────────────────────────────────
+
 const enet = require("enet");
 const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
@@ -280,4 +304,10 @@ if (config.game && config.game.autoLaunch !== false) {
   setTimeout(() => {
     gameLauncher.launch();
   }, 1500);
+}
+
+// Keep the console window alive
+logger.info("Proxy is running. Press Ctrl+C to stop.");
+if (process.stdin.isTTY) {
+  process.stdin.resume();
 }
