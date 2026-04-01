@@ -164,6 +164,125 @@ class PacketHandler {
     return Buffer.concat([header, textBuf]);
   }
 
+  // ── Variant packet builder (for OnConsoleMessage, OnTextOverlay, etc.) ──
+
+  /**
+   * Serialize a variant list into binary.
+   * Each variant is { type, value }:
+   *   type 1 = float,  type 2 = string,  type 3 = vec2 [x,y],
+   *   type 4 = vec3 [x,y,z],  type 5 = uint32,  type 9 = int32
+   */
+  static serializeVariantList(variants) {
+    const parts = [];
+
+    // Variant count (1 byte)
+    const countBuf = Buffer.alloc(1);
+    countBuf.writeUInt8(variants.length, 0);
+    parts.push(countBuf);
+
+    for (let i = 0; i < variants.length; i++) {
+      const v = variants[i];
+
+      // Index (1 byte)
+      const idxBuf = Buffer.alloc(1);
+      idxBuf.writeUInt8(i, 0);
+      parts.push(idxBuf);
+
+      // Type (1 byte)
+      const typeBuf = Buffer.alloc(1);
+      typeBuf.writeUInt8(v.type, 0);
+      parts.push(typeBuf);
+
+      switch (v.type) {
+        case 1: { // float
+          const fb = Buffer.alloc(4);
+          fb.writeFloatLE(v.value, 0);
+          parts.push(fb);
+          break;
+        }
+        case 2: { // string
+          const strBuf = Buffer.from(v.value, "utf8");
+          const lenBuf = Buffer.alloc(4);
+          lenBuf.writeUInt32LE(strBuf.length, 0);
+          parts.push(lenBuf, strBuf);
+          break;
+        }
+        case 3: { // vec2
+          const v2 = Buffer.alloc(8);
+          v2.writeFloatLE(v.value[0], 0);
+          v2.writeFloatLE(v.value[1], 4);
+          parts.push(v2);
+          break;
+        }
+        case 4: { // vec3
+          const v3 = Buffer.alloc(12);
+          v3.writeFloatLE(v.value[0], 0);
+          v3.writeFloatLE(v.value[1], 4);
+          v3.writeFloatLE(v.value[2], 8);
+          parts.push(v3);
+          break;
+        }
+        case 5: { // uint32
+          const ub = Buffer.alloc(4);
+          ub.writeUInt32LE(v.value, 0);
+          parts.push(ub);
+          break;
+        }
+        case 9: { // int32
+          const ib = Buffer.alloc(4);
+          ib.writeInt32LE(v.value, 0);
+          parts.push(ib);
+          break;
+        }
+      }
+    }
+
+    return Buffer.concat(parts);
+  }
+
+  /**
+   * Build a full tank packet that calls a variant function.
+   * Returns a complete message (4-byte msg header + 56-byte tank header + variant data).
+   */
+  static buildVariantPacket(variants, netID = -1, delay = 0) {
+    const variantData = PacketHandler.serializeVariantList(variants);
+
+    // 4-byte message header (type 4 = TANK)
+    const msgHeader = Buffer.alloc(4);
+    msgHeader.writeUInt32LE(MSG_TYPE.TANK, 0);
+
+    // 56-byte tank header
+    const tank = Buffer.alloc(56);
+    tank.writeUInt32LE(TANK_TYPE.CALL_FUNCTION, 0); // tankType
+    tank.writeInt32LE(netID, 4);                     // netID
+    tank.writeInt32LE(-1, 8);                        // targetNetID
+    tank.writeUInt32LE(8, 12);                       // state flags (0x8 = extra data)
+    tank.writeInt32LE(delay, 20);                    // delay
+    tank.writeUInt32LE(variantData.length, 52);      // extraDataSize
+
+    return Buffer.concat([msgHeader, tank, variantData]);
+  }
+
+  /**
+   * Build an OnConsoleMessage packet (shows text in the chat/console).
+   */
+  static buildConsoleMessage(text) {
+    return PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnConsoleMessage" },
+      { type: 2, value: text },
+    ]);
+  }
+
+  /**
+   * Build an OnTextOverlay packet (shows text centered on screen, fades out).
+   */
+  static buildTextOverlay(text) {
+    return PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnTextOverlay" },
+      { type: 2, value: text },
+    ]);
+  }
+
   /**
    * Inject items (free outfit)
    * TODO: Implementasi actual packet injection

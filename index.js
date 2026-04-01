@@ -163,6 +163,9 @@ class GrowtopiaProxy {
 
             logger.info(`[${clientId}] Connected to GT server`);
             session.serverPeer = peer;
+
+            // Send in-game status to client
+            this.sendStatus(clientId);
           }
         );
 
@@ -245,6 +248,37 @@ class GrowtopiaProxy {
     }
 
     return modifiedData;
+  }
+
+  /**
+   * Send a raw packet buffer to a client peer.
+   */
+  sendToClient(clientId, data) {
+    const session = this.sessions.get(clientId);
+    if (!session || !session.clientPeer) return;
+    try {
+      const pkt = new enet.Packet(data, enet.PACKET_FLAG.RELIABLE);
+      session.clientPeer.send(0, pkt);
+    } catch (err) {
+      logger.debug(`[${clientId}] sendToClient failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Show in-game proxy status to the player.
+   */
+  sendStatus(clientId) {
+    // Console message (chat box)
+    const consoleMsg = PacketHandler.buildConsoleMessage(
+      "`4[`#dqymon-proxy`4]`` `2Connected to proxy!``"
+    );
+    this.sendToClient(clientId, consoleMsg);
+
+    // Text overlay (big centered text, fades out)
+    const overlay = PacketHandler.buildTextOverlay(
+      "`4dqymon-proxy `2active``"
+    );
+    this.sendToClient(clientId, overlay);
   }
 
   cleanup(clientId) {

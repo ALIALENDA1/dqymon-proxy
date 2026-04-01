@@ -58,7 +58,8 @@ bIPhzARFjxeyra0M5931+84jV1rongILUwHB1Efs7z9B3J5G
 class LoginServer {
   constructor() {
     this.logger = new Logger();
-    this.server = null;
+    this.httpsServer = null;
+    this.httpServer = null;
   }
 
   /**
@@ -81,6 +82,8 @@ class LoginServer {
 
   handleRequest(req, res) {
     this.logger.info(`[LOGIN] ${req.method} ${req.url}`);
+
+    // Respond to any path — Growtopia hits /growtopia/server_data.php
     const data = this.getServerData();
     res.writeHead(200, {
       "Content-Type": "text/html",
@@ -92,46 +95,45 @@ class LoginServer {
   start() {
     const handler = (req, res) => this.handleRequest(req, res);
 
-    this.server = https.createServer(
+    // Start HTTPS on :443
+    this.httpsServer = https.createServer(
       { key: EMBEDDED_KEY, cert: EMBEDDED_CERT },
       handler
     );
 
-    this.server.listen(443, () => {
+    this.httpsServer.listen(443, () => {
       this.logger.info("✓ Login server started on HTTPS :443");
     });
 
-    this.server.on("error", (err) => {
+    this.httpsServer.on("error", (err) => {
+      this.logger.warn(`HTTPS :443 failed (${err.code})`);
+    });
+
+    // ALSO start HTTP on :80 — Growtopia falls back to HTTP
+    // when HTTPS cert validation fails
+    this.httpServer = http.createServer(handler);
+
+    this.httpServer.listen(80, () => {
+      this.logger.info("✓ Login server started on HTTP :80");
+    });
+
+    this.httpServer.on("error", (err) => {
       if (err.code === "EACCES" || err.code === "EADDRINUSE") {
-        this.logger.warn(
-          `HTTPS :443 failed (${err.code}). Trying HTTP :80 fallback...`
-        );
-        this.startHttp(handler);
+        this.logger.warn(`HTTP :80 failed (${err.code})`);
       } else {
-        this.logger.error(`Login server error: ${err.message}`);
+        this.logger.error(`HTTP login server error: ${err.message}`);
       }
     });
   }
 
-  startHttp(handler) {
-    this.server = http.createServer(handler);
-
-    this.server.listen(80, () => {
-      this.logger.info("✓ Login server started on HTTP :80");
-    });
-
-    this.server.on("error", (err) => {
-      this.logger.error(
-        `Login server on :80 failed (${err.code}). ` +
-          "Run as Administrator / root to bind to privileged ports."
-      );
-    });
-  }
-
   stop() {
-    if (this.server) {
-      this.server.close();
-      this.server = null;
+    if (this.httpsServer) {
+      this.httpsServer.close();
+      this.httpsServer = null;
+    }
+    if (this.httpServer) {
+      this.httpServer.close();
+      this.httpServer = null;
     }
   }
 }
