@@ -7,53 +7,54 @@ const Logger = require("./Logger");
 // Embedded self-signed certificate for Growtopia domains
 // Valid for 10 years — no openssl dependency needed.
 const EMBEDDED_KEY = `-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCTfIGaXcakRgI8
-Rcgu41QrupDiM7URGlX2Qmpc4UQ/B3T5hkcQw4Hfvn3Ck0S0KJ/6YRbHGjQVQ02Y
-fPJrQoirvOKAcrvCkAFZGRRMQFUJxuwcJ5SBX552/pJmYlKQ9RueQORt6Nbm0fST
-FW5MALC2+qLunKBXRoeWFGRFPBUiuiqk5qJYlswFtrCaSRQOx8HbbFe0FhbzX2I8
-6BtMRm2dxoVnaUAG6FViUcPkSBD6Yz+Pis+FuGhXQ3HNTzDT3Oi5qI4ohLLwVA48
-iJ/+NhGfDeu/TRJXQGHOjvuB9U7lkSEVnJQPa59it/S9DPUv4JLIjeO06TYn3yNZ
-uBYRt64BAgMBAAECggEACCLsxXbZ8BMaqXeSESAicx0iRBBlM1HYHzNPydr1mGKR
-bfid8AtRHWZVasgUGLpLBRWZG5fS+r9RRxHRj+BGSO8tMbfiqtul72PmTkSYTGdI
-fE8krrR3OgpWSkavVmbnRKZA091uCaLYksqyYIgDN70BAxfp8pamAT4TwAwOAHHe
-VIa45PwJwZ4ejF7+pqmUmlo670gfUrduJAIeHoH9O95E+k1YhVBhaYDflqf927DI
-WhQz8gGmCDKkFNqzvsLHEonW0S0FEGnTjULeMZaWs0asEQwekZMevGHRPDWOn7L4
-PTh9ooeVGga7mJDdbLFl5rQ1EVXoy7GGI8c3w9CwIQKBgQDL5P7+t/MT7XsZeLSd
-e1QLF5g1oVtyBlGHHsU7fGVKNzVnu1rhk6/Z+S0j1Ca7eQb9s/3EJBPkPjD+nLAk
-17FzjCCiiRBReEEWSKaseDroTZ7noaIx96vYP6jctfq+IXRCEt0Kl4ZY8dcmU3W3
-yKq28o68Zk3bH/WAq279eBJxaQKBgQC5LTnZ0Kaj+YL8mOKqyNLSxgkTalkHyG3q
-Kxxi77L9q8ecupV61QLUkGKJ7xfqbvDXVuQ9modgYxZ3VRoQzW+e3EBqk9GLdj2q
-zZUGAcQNv6cSA4bc/w7VSQt2WMqtSGha329b8EA3bBxGX1yvCwiAK4Xg7DATJ8C4
-pQ4up2us2QKBgGJGSbG0L/FW8ZJhX4zYOLXv9WlEELNw4DLkXeRCHQAchB0vbKp1
-aLkDJQKz6sdJmlkGPDYhvYSxhSPzmeLoI5ux2rj8n2TlNVnsQom2mY4Ge6Thfy/e
-VHGynU1kWSrzLPn75ZaJWjPcvPq4F3ExwzbSyoF8PeJ0EPynpKN/EEShAoGBAKyO
-z30BKXheF8jpczfw4jzVnDmCfap6BKsVN2OeuK4YuG99k7Qd8YBBeAHPUvr8HOSe
-LRyW9pZEX/gdzqdfuSdRWZm3W6pZKggTgU5SsO6a7MYlkTQ5Xgo1AkBrZ5rogY5E
-7hG/pSfAT+zoCod3gZlmdWBu2DHRdo7aCIhDLVypAoGBAIyFtUTY7/ncDV/+2wiC
-Qpw/LdErxry2mMCsX7abwzGcjaC8ssHMAXnUISY8eu219AOBvAFxLBp0zsoNdMVU
-WTu1eIXFfZSGeqpMlLugLutxQlex7OXlPZxjhAiNKDwwmm94opmWBPbjUtoBJACV
-jBWruiYdnHHnCiWQu/yt3tD4
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCrWMnrK7aTwklm
+Xo0aiT5oZhPBjBtj9uGrponKIp1UFhqhpAYxWtkU9X/yhzbiA3yMYWb7MNx0E0a2
+5s825ekuYbYjmFuRCNtOREB52y1fitBVUOmMunBQ4/Wj+aEk0aylc6qOnO2gYo50
+fCy9MMqf6xRweUtamRINbfrhV9FbuRRWchRoxJaKqqk5Zou1/1QRsCV6SdLKZnYN
+aLmChg4/m0FkdmACToN7TwaGJgvzVK6EmF0hdVp5CChqOvbhuNzCI7QVbgB2saoX
+B/v8E5FYJXAVgGJVfgtMLjx/bhEUGtSLIm40VTxW5mWosfzn8RjmMgfikXuBvnnr
+k6NmB6+fAgMBAAECggEASD8ivD7tN7YW3swFMOgnYTuRHu2lauvg0VBiDtGzho3f
+YsJXPh4xI+4zqZ4rnPadYE99bXJ3sZWjHmGJg3tDa6QVeUK3cRrL5V9P1FF++yb7
+ms2H/CdsTh8gJqiNsomaAxUXGBTA+Pw1VpY5Avh8pxsmvhnWlPevrevueW9evg5G
+D5yExSXuY1MRGJ7qU8rrwAs6jOLhG8hRrsAIoWXgKu54JKfnvnE8m5MBKxTgrYJk
+ug66KoMuwMvroh2rm+NdIdTMRfllq7fuw8zA99chzlZ3IyjlRZoSxoN/f5GsnTwt
+jCBoMH7zfZHt84sSYoSW1Sfk84TMD2r7PcslOUsJMQKBgQDRyoG0+AjIFAoMOJeS
+xmQvKnUD7Er/MxnXhhMhTixXYz2+BhkEXPRxc/TD2OjZUZhk5hMt52Oy/sP4SfRM
+G8S4yoRj5h0H1f39U4oJuhkLwG/px0tcciaSgNyN+5V63Ht1ruT50CeGAFCp9WY5
+3xTpCFF+ft5aeBCr3NWzYLJPiQKBgQDRFob877G0FenOd9OfoYY6ySsnaJwr08Np
+Lys0+IH7HNH+CS3bNj7VPPyz7CvBX09WXzjyVJlAyt5g95DixUvRSB7OrnZf2W5F
+iMBpE3FzZKkM7aUpxfYg5gQmFqoy5U1RnAxZ2/ul74QNV5asbJ5AgfpYknV6qJRe
+S5rOp/TT5wKBgQCRdvsNAlcEdHCrHKpsyUc6NRRCDhvKbCJlAMBO/addSKDNG+lI
+zzNnX2G+Uq7R0PP8MlPmJmVI/cHgbVcJVs/G2hWGN0612jls5/n02Kb5MQvoa5nj
+lfsM5nEHugRh1nN8nDKEzUI6dgl4b4HcasRS+MOZFFsVG99ja5J5+HhrEQKBgBd6
+XxgB1kNxfnqHrAStv4PUWPso3Phy4+tot4JQMVBAMThEUZje43lQStPtPhCNojwB
+n0ReyYKkBQqAYg2Et/m9DnCI2JP0t1QpgemKnF+nuu/Ps48YQoX5LhgUzXG/m8oB
+KsXgVMaSOZLB9hJQdAisT68oaval/VsFRFHWPECbAoGBAJ5wgxjNgHLoONdzyPaC
+tA0eZbQMj4ph4MngnCqRiF4k9M1RHZbM8wTeIHoBVKCUk0G5ZMjyuFTbUale4mXB
+CsMJtKEYcRWQ9vExtp0ves93tWuRktEN1EF45r6cMBXzqaeN5sJXOX5jS5EET4vk
+6zgZF40j6iIleDewuYPfyzpI
 -----END PRIVATE KEY-----`;
 
 const EMBEDDED_CERT = `-----BEGIN CERTIFICATE-----
-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
+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
 -----END CERTIFICATE-----`;
 
 class LoginServer {
@@ -134,7 +135,22 @@ class LoginServer {
               `port|${config.proxy.port}`
             );
 
-            this.logger.info("[LOGIN] Modified server_data → proxy address");
+            // Force type2|1 — tells GT to skip the web-based login
+            // flow (loginurl) and connect directly via ENet.
+            // Without this, GT tries to reach loginurl which fails
+            // through the hosts redirect and causes a 404 error.
+            if (/^type2\|/m.test(body)) {
+              body = body.replace(/^type2\|.+$/m, "type2|1");
+            } else {
+              // Insert before RTENDMARKERBS1001 or append
+              if (body.includes("RTENDMARKERBS1001")) {
+                body = body.replace("RTENDMARKERBS1001", "type2|1\nRTENDMARKERBS1001");
+              } else {
+                body += "\ntype2|1";
+              }
+            }
+
+            this.logger.info("[LOGIN] Modified server_data → proxy address (type2|1)");
             resolve(body);
           });
         });
@@ -169,6 +185,7 @@ class LoginServer {
       `server|${proxyHost}`,
       `port|${config.proxy.port}`,
       `type|1`,
+      `type2|1`,
       `#maint|Server is online. Good luck!`,
       `meta|dqymon-proxy`,
       `RTENDMARKERBS1001`,
@@ -176,20 +193,79 @@ class LoginServer {
   }
 
   /**
+   * Proxy a non-server_data request to the real GT server,
+   * forwarding the path, method, headers, and body as-is.
+   */
+  proxyRawRequest(origReq, origRes, body) {
+    const ep = this.realLoginEndpoints[0]; // Use first endpoint
+    const reqOpts = {
+      hostname: ep.ip,
+      port: 443,
+      path: origReq.url,
+      method: origReq.method || "GET",
+      headers: {
+        ...origReq.headers,
+        host: origReq.headers.host || ep.host,
+      },
+      servername: ep.host,
+      timeout: 8000,
+      rejectUnauthorized: true,
+    };
+    // Remove connection-hop headers
+    delete reqOpts.headers["connection"];
+    delete reqOpts.headers["accept-encoding"];
+
+    const proxyReq = https.request(reqOpts, (resp) => {
+      const chunks = [];
+      resp.on("data", (c) => chunks.push(c));
+      resp.on("end", () => {
+        const respBody = Buffer.concat(chunks);
+        this.logger.info(`[LOGIN] Proxied ${origReq.url} → ${resp.statusCode} (${respBody.length}b)`);
+        origRes.writeHead(resp.statusCode, resp.headers);
+        origRes.end(respBody);
+      });
+    });
+
+    proxyReq.on("error", (err) => {
+      this.logger.warn(`[LOGIN] Proxy raw error: ${err.message}`);
+      origRes.writeHead(502, { "Content-Type": "text/plain" });
+      origRes.end("Proxy error");
+    });
+
+    proxyReq.on("timeout", () => {
+      this.logger.warn(`[LOGIN] Proxy raw timeout for ${origReq.url}`);
+      proxyReq.destroy();
+      origRes.writeHead(504, { "Content-Type": "text/plain" });
+      origRes.end("Timeout");
+    });
+
+    if (body) proxyReq.write(body);
+    proxyReq.end();
+  }
+
+  /**
    * Handle an HTTP request. Forwards to the real GT login server,
    * modifies the response, and sends it back to the game.
    */
-  handleRequest(req, res) {
+  handleRequest(req, res, protocol) {
     // Collect POST body (Growtopia sends POST with form data)
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
       const postBody = Buffer.concat(chunks).toString();
       this.logger.info(
-        `[LOGIN] ${req.method} ${req.url} ` +
+        `[LOGIN] ${protocol} ${req.method} ${req.url} ` +
         `(${req.headers.host || "no-host"}) ` +
         `body=${postBody.length}b`
       );
+
+      // Only handle /growtopia/server_data.php — the GT login endpoint
+      if (!req.url || !req.url.includes("/growtopia/server_data.php")) {
+        this.logger.warn(`[LOGIN] Unknown path: ${req.url} — proxying raw`);
+        // Proxy the request to the real GT server at the same path
+        this.proxyRawRequest(req, res, postBody);
+        return;
+      }
 
       this.fetchAndModifyServerData(postBody)
         .then((data) => {
@@ -220,13 +296,14 @@ class LoginServer {
   }
 
   start() {
-    const handler = (req, res) => this.handleRequest(req, res);
+    const httpsHandler = (req, res) => this.handleRequest(req, res, "HTTPS");
+    const httpHandler = (req, res) => this.handleRequest(req, res, "HTTP");
 
     // ── HTTPS on :443 ──────────────────────────────────────────────
     try {
       const httpsServer = https.createServer(
         { key: EMBEDDED_KEY, cert: EMBEDDED_CERT },
-        handler
+        httpsHandler
       );
 
       httpsServer.on("tlsClientError", () => {
@@ -248,7 +325,7 @@ class LoginServer {
 
     // ── HTTP on :80 ────────────────────────────────────────────────
     try {
-      const httpServer = http.createServer(handler);
+      const httpServer = http.createServer(httpHandler);
 
       httpServer.listen(80, "0.0.0.0", () => {
         this.logger.info("✓ Login server listening on HTTP :80");
@@ -272,7 +349,7 @@ class LoginServer {
 
     // ── HTTP on :8080 (guaranteed no-privilege port) ───────────────
     try {
-      const httpAlt = http.createServer(handler);
+      const httpAlt = http.createServer(httpHandler);
 
       httpAlt.listen(8080, "0.0.0.0", () => {
         this.logger.info("✓ Login server listening on HTTP :8080 (alt)");
