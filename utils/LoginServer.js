@@ -107,6 +107,7 @@ class LoginServer {
     this.servers = [];
     this.certInstalled = false;
     this.rateLimitMap = new Map(); // ip -> { count, resetTime }
+    this.gameLog = null; // set externally by index.js
     // The real GT server address/port extracted from the login response.
     // index.js reads these to know where to connect via ENet.
     this.realServerHost = null;
@@ -476,9 +477,15 @@ class LoginServer {
           });
           res.end(data);
           this.logger.info(`[LOGIN] Sent modified server_data (${data.length}b)`);
+          if (this.gameLog) {
+            this.gameLog.logLogin(true, `server_data → ${this.realServerHost}:${this.realServerPort}`);
+          }
         })
         .catch((err) => {
           this.logger.error(`[LOGIN] Handler error: ${err.message}`);
+          if (this.gameLog) {
+            this.gameLog.logLogin(false, `Error: ${err.message}`);
+          }
           const fallback = this.getFallbackServerData();
           res.writeHead(200, {
             "Content-Type": "text/html",

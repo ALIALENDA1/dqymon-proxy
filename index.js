@@ -37,8 +37,10 @@ const Logger = require("./utils/Logger");
 const LoginServer = require("./utils/LoginServer");
 const GameLauncher = require("./utils/GameLauncher");
 const ENetParser = require("./utils/ENetParser");
+const GameLog = require("./utils/GameLog");
 
 const logger = new Logger();
+const gameLog = new GameLog();
 
 // Session timeout: clean up sessions with no activity for 60 seconds
 const SESSION_TIMEOUT_MS = 60 * 1000;
@@ -47,21 +49,35 @@ class GrowtopiaProxy {
   constructor() {
     // clientKey ("addr:port") → session object
     this.sessions = new Map();
+    // Reverse lookup: "serverHost:serverPort" → session
+    // Used to route GT server responses back to the correct client.
+    this.serverMap = new Map();
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
-    this.proxySocket = null;       // Main UDP socket (client ↔ proxy)
+    this.proxySocket = null;       // Single UDP socket for ALL traffic
     this.loginServer = null;       // set after construction
     // Queue of pending sub-server redirects (survives session teardown).
     this.pendingServerQueue = [];
+    // Global packet counters
+    this.totalClientPackets = 0;
+    this.totalServerPackets = 0;
   }
 
   start() {
     this.proxySocket = dgram.createSocket("udp4");
 
     this.proxySocket.on("message", (msg, rinfo) => {
+      // ── Check if this is a RESPONSE from a known GT server ──
+      const serverKey = `${rinfo.address}:${rinfo.port}`;
+      const serverSession = this.serverMap.get(serverKey);
+      if (serverSession) {
+        this.handleServerMessage(serverSession, msg, rinfo);
+        return;
+      }
+
+      // ── Otherwise, it's a CLIENT packet ──
       const clientKey = `${rinfo.address}:${rinfo.port}`;
 
-      // Create session on first packet from this client
       if (!this.sessions.has(clientKey)) {
         this.createSession(clientKey, rinfo);
       }
@@ -69,8 +85,9 @@ class GrowtopiaProxy {
       const session = this.sessions.get(clientKey);
       session.lastActivity = Date.now();
       session.clientPackets = (session.clientPackets || 0) + 1;
+      this.totalClientPackets++;
 
-      // Log first few packets and then periodically at info level
+      // Log first few packets and then periodically
       if (session.clientPackets <= 3 || session.clientPackets % 50 === 0) {
         logger.info(
           `[${session.clientId}] Client → Server: ${msg.length} bytes (pkt #${session.clientPackets})`
@@ -85,8 +102,12 @@ class GrowtopiaProxy {
       // Inspect Growtopia payloads inside the ENet datagram
       const modified = this.inspectClientDatagram(session, msg);
 
-      // Forward to real GT server
-      session.serverSocket.send(
+      // Forward to real GT server using the SAME proxy socket.
+      // This means the GT server sees our publicIP:17091 as source,
+      // and responds to the same address — which our socket receives.
+      // This avoids creating ephemeral-port sockets that Windows
+      // firewall might block.
+      this.proxySocket.send(
         modified, 0, modified.length,
         session.serverPort, session.serverHost,
         (err) => {
@@ -112,8 +133,50 @@ class GrowtopiaProxy {
   }
 
   /**
-   * Create a new session for a client. Allocates a dedicated server-side
-   * UDP socket so each client has an isolated connection to the GT server.
+   * Handle a response from the GT server, relay it back to the client.
+   */
+  handleServerMessage(session, msg, rinfo) {
+    session.lastActivity = Date.now();
+    session.serverPackets = (session.serverPackets || 0) + 1;
+    this.totalServerPackets++;
+
+    // First server response = connection established!
+    if (session.serverPackets === 1) {
+      logger.info(`[${session.clientId}] ✓ GT server responded! Connection established.`);
+      gameLog.logConnectionSuccess(
+        session.clientId,
+        `${session.serverHost}:${session.serverPort}`
+      );
+    }
+
+    // Log first few packets and then periodically
+    if (session.serverPackets <= 3 || session.serverPackets % 50 === 0) {
+      logger.info(
+        `[${session.clientId}] Server → Client: ${msg.length} bytes from ` +
+        `${rinfo.address}:${rinfo.port} (pkt #${session.serverPackets})`
+      );
+    }
+
+    // Inspect/modify server-to-client traffic (OnSendToServer, etc.)
+    const modified = this.inspectServerDatagram(session, msg);
+
+    // Relay back to the game client via the same proxy socket
+    this.proxySocket.send(
+      modified, 0, modified.length,
+      session.clientPort, session.clientAddr,
+      (err) => {
+        if (err) {
+          logger.error(`[${session.clientId}] Failed to send to client: ${err.message}`);
+        }
+      }
+    );
+  }
+
+  /**
+   * Create a new session for a client.
+   * No separate server socket — we use the single proxy socket for
+   * both directions. This keeps all traffic on port 17091, which
+   * already has firewall rules.
    */
   createSession(clientKey, rinfo) {
     const clientId = crypto.randomBytes(6).toString("hex");
@@ -132,19 +195,41 @@ class GrowtopiaProxy {
       serverPort = config.serverConfig.port;
     }
 
-    const serverSocket = dgram.createSocket("udp4");
-
     const session = {
       clientId,
       clientAddr: rinfo.address,
       clientPort: rinfo.port,
-      serverSocket,
       serverHost,
       serverPort,
       lastActivity: Date.now(),
+      clientPackets: 0,
+      serverPackets: 0,
     };
 
-    // Warn if GT server never responds (likely maintenance or firewall)
+    // Register in both lookup maps
+    this.sessions.set(clientKey, session);
+    const serverKey = `${serverHost}:${serverPort}`;
+
+    // Clean up any old session using the same server address
+    const oldSession = this.serverMap.get(serverKey);
+    if (oldSession && oldSession !== session) {
+      const oldClientKey = `${oldSession.clientAddr}:${oldSession.clientPort}`;
+      if (oldSession.noResponseTimer) clearTimeout(oldSession.noResponseTimer);
+      this.sessions.delete(oldClientKey);
+      logger.info(`[${oldSession.clientId}] Replaced by new session`);
+    }
+    this.serverMap.set(serverKey, session);
+
+    logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
+    gameLog.logConnection(clientId, `${serverHost}:${serverPort}`);
+
+    // If we know the server is in maintenance, warn immediately
+    if (this.loginServer && this.loginServer.maintenanceDetected) {
+      logger.warn(`[${clientId}] ⚠ GT server is in MAINTENANCE MODE — connection will likely time out`);
+      gameLog.logMaintenance("GT server reported maintenance in server_data");
+    }
+
+    // Warn if GT server never responds after 10 seconds
     session.noResponseTimer = setTimeout(() => {
       if (!session.serverPackets) {
         logger.warn(
@@ -153,55 +238,15 @@ class GrowtopiaProxy {
         logger.warn(
           `[${clientId}] ⚠ The server may be in maintenance, or outbound UDP is blocked.`
         );
+        gameLog.logConnectionFail(
+          clientId,
+          `${serverHost}:${serverPort}`,
+          "No response after 10s"
+        );
         // Run a direct probe to confirm
         this.probeServer(serverHost, serverPort);
       }
     }, 10000);
-
-    // Server → Client relay
-    serverSocket.on("message", (serverMsg, serverInfo) => {
-      session.lastActivity = Date.now();
-      session.serverPackets = (session.serverPackets || 0) + 1;
-
-      // Log first few packets and then periodically at info level
-      if (session.serverPackets <= 3 || session.serverPackets % 50 === 0) {
-        logger.info(
-          `[${clientId}] Server → Client: ${serverMsg.length} bytes from ${serverInfo.address}:${serverInfo.port} (pkt #${session.serverPackets})`
-        );
-      }
-
-      // Inspect/modify server-to-client traffic (OnSendToServer, etc.)
-      const modified = this.inspectServerDatagram(session, serverMsg);
-
-      // Relay back to the game client via the main proxy socket
-      this.proxySocket.send(
-        modified, 0, modified.length,
-        session.clientPort, session.clientAddr,
-        (err) => {
-          if (err) {
-            logger.error(`[${clientId}] Failed to send to client: ${err.message}`);
-          }
-        }
-      );
-    });
-
-    serverSocket.on("error", (err) => {
-      logger.error(`[${clientId}] Server socket error: ${err.message}`);
-    });
-
-    // Log when the server socket is ready
-    serverSocket.on("listening", () => {
-      const addr = serverSocket.address();
-      logger.info(`[${clientId}] Server socket bound to ${addr.address}:${addr.port}`);
-    });
-
-    this.sessions.set(clientKey, session);
-    logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
-
-    // If we know the server is in maintenance, warn immediately
-    if (this.loginServer && this.loginServer.maintenanceDetected) {
-      logger.warn(`[${clientId}] ⚠ GT server is in MAINTENANCE MODE — connection will likely time out`);
-    }
   }
 
   // ── ENet diagnostics ─────────────────────────────────────────────
@@ -530,10 +575,17 @@ class GrowtopiaProxy {
     if (!session) return;
 
     if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
-    try { session.serverSocket.close(); } catch (e) { /* already closed */ }
+
+    // Remove from server reverse-lookup map
+    const serverKey = `${session.serverHost}:${session.serverPort}`;
+    if (this.serverMap.get(serverKey) === session) {
+      this.serverMap.delete(serverKey);
+    }
+
     this.sessions.delete(clientKey);
     this.commandHandler.clearUserState(session.clientId);
 
+    gameLog.logPackets(this.totalClientPackets, this.totalServerPackets);
     logger.info(`[${session.clientId}] Session cleaned up`);
   }
 
@@ -562,6 +614,7 @@ const gameLauncher = new GameLauncher();
 
 // The proxy needs access to the loginServer to read dynamic server address
 proxy.loginServer = loginServer;
+loginServer.gameLog = gameLog;
 
 // Restore hosts file on any exit
 function cleanup() {
@@ -608,6 +661,7 @@ if (config.game && config.game.autoLaunch !== false) {
 
 // Keep the console window alive
 logger.info("Proxy is running. Press Ctrl+C to stop.");
+logger.info(`Game log: ${gameLog.logPath}`);
 if (process.stdin.isTTY) {
   process.stdin.resume();
 }
