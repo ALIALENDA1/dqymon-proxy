@@ -139,6 +139,18 @@ class GrowtopiaProxy {
       lastActivity: Date.now(),
     };
 
+    // Warn if GT server never responds (likely maintenance or firewall)
+    session.noResponseTimer = setTimeout(() => {
+      if (!session.serverPackets) {
+        logger.warn(
+          `[${clientId}] ⚠ No response from GT server ${serverHost}:${serverPort} after 10 seconds!`
+        );
+        logger.warn(
+          `[${clientId}] ⚠ The server may be in maintenance, or outbound UDP is blocked.`
+        );
+      }
+    }, 10000);
+
     // Server → Client relay
     serverSocket.on("message", (serverMsg, serverInfo) => {
       session.lastActivity = Date.now();
@@ -362,6 +374,7 @@ class GrowtopiaProxy {
     const session = this.sessions.get(clientKey);
     if (!session) return;
 
+    if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
     try { session.serverSocket.close(); } catch (e) { /* already closed */ }
     this.sessions.delete(clientKey);
     this.commandHandler.clearUserState(session.clientId);

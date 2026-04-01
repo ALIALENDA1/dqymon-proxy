@@ -155,6 +155,12 @@ class LoginServer {
       const proxyHost =
         config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
 
+      // Guard flag: prevents resolve/tryEndpoint from being called more
+      // than once.  Without this, timeout → req.destroy() → error would
+      // fork the retry chain, creating duplicate parallel branches that
+      // race to overwrite realServerHost/Port and send multiple responses.
+      let done = false;
+
       // Reorder endpoints so preferred host is tried first
       let endpoints = [...this.realLoginEndpoints];
       if (preferHost) {
@@ -165,7 +171,10 @@ class LoginServer {
       }
 
       const tryEndpoint = (index) => {
+        if (done) return;          // already resolved — stop this branch
+
         if (index >= endpoints.length) {
+          done = true;
           this.logger.warn("[LOGIN] All real GT servers unreachable, using fallback");
           resolve(this.getFallbackServerData());
           return;
@@ -173,6 +182,8 @@ class LoginServer {
 
         const ep = endpoints[index];
         this.logger.info(`[LOGIN] Trying ${ep.host} @ ${ep.ip}`);
+
+        let moved = false;         // per-endpoint guard against timeout+error double-fire
 
         const reqOpts = {
           hostname: ep.ip,           // Connect to IP directly (bypasses hosts file)
@@ -194,13 +205,15 @@ class LoginServer {
           const chunks = [];
           resp.on("data", (c) => chunks.push(c));
           resp.on("end", () => {
+            if (done) return;       // another branch already resolved
+
             let body = Buffer.concat(chunks).toString();
             this.logger.info(
               `[LOGIN] ${ep.host} responded: ${resp.statusCode} (${body.length}b)`
             );
 
             if (resp.statusCode !== 200 || body.length < 20) {
-              tryEndpoint(index + 1);
+              if (!moved) { moved = true; tryEndpoint(index + 1); }
               return;
             }
 
@@ -212,6 +225,13 @@ class LoginServer {
             if (portMatch) this.realServerPort = parseInt(portMatch[1].trim(), 10);
             this.logger.info(`[LOGIN] Real GT server: ${this.realServerHost}:${this.realServerPort}`);
             if (loginUrlMatch) this.logger.info(`[LOGIN] loginurl: ${loginUrlMatch[1].trim()}`);
+
+            // Detect maintenance mode and warn prominently
+            const maintMatch = body.match(/^#maint\|(.+)$/m);
+            if (maintMatch) {
+              this.logger.warn(`[LOGIN] ⚠ SERVER IS IN MAINTENANCE: ${maintMatch[1].trim()}`);
+              this.logger.warn(`[LOGIN] ⚠ ENet connections will likely time out until maintenance ends!`);
+            }
 
             // Log the original response before modification
             this.logger.info(`[LOGIN] Original server_data:\n${body}`);
@@ -259,18 +279,23 @@ class LoginServer {
 
             this.logger.info("[LOGIN] Modified server_data → proxy address (type2|1, stripped error/maint)");
             this.logger.info(`[LOGIN] server_data response body:\n${body}`);
+            done = true;
             resolve(body);
           });
         });
 
         req.on("error", (err) => {
+          if (done || moved) return;   // already resolved or already moved to next endpoint
+          moved = true;
           this.logger.warn(`[LOGIN] ${ep.host}@${ep.ip} failed: ${err.message}`);
           tryEndpoint(index + 1);
         });
 
         req.on("timeout", () => {
+          if (done || moved) return;
+          moved = true;
           this.logger.warn(`[LOGIN] ${ep.host}@${ep.ip} timed out`);
-          req.destroy();
+          req.destroy();              // just close — don't call tryEndpoint from error too
           tryEndpoint(index + 1);
         });
 
