@@ -2,18 +2,33 @@
   "name": "growtopia-proxy",
   "version": "1.0.0",
   "description": "Growtopia Proxy with custom commands",
-  "main": "src/index.js",
+  "main": "index.js",
+  "bin": "index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "build": "pkg . --targets node18-win-x64 --output dist/dqymon-proxy.exe",
+    "build:all": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64 --out-path dist"
   },
-  "keywords": ["growtopia", "proxy"],
+  "pkg": {
+    "assets": [
+      "node_modules/enet/build/**/*",
+      "config/**/*"
+    ],
+    "outputPath": "dist"
+  },
+  "keywords": [
+    "growtopia",
+    "proxy"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+    "enet": "^0.2.9"
   },
   "devDependencies": {
-    "nodemon": "^2.0.22"
+    "nodemon": "^2.0.22",
+    "pkg": "^5.8.1"
   }
 }

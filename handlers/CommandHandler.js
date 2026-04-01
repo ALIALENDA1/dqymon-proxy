@@ -148,6 +148,10 @@ Available Commands:
     if (!this.userStates.has(clientId)) return null;
     return this.userStates.get(clientId)[key];
   }
+
+  clearUserState(clientId) {
+    this.userStates.delete(clientId);
+  }
 }
 
 module.exports = CommandHandler;

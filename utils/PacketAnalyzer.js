@@ -30,7 +30,6 @@ class PacketAnalyzer {
       size: data.length,
       hex: data.toString("hex"),
       ascii: this.tryAscii(data),
-      raw: data,
     };
 
     this.packets.push(packet);
@@ -91,7 +90,10 @@ ${packet.ascii}
    * Save semua packets ke file
    */
   dumpToFile(filename = `dump_${Date.now()}.txt`) {
-    const filepath = path.join(this.dumpDir, filename);
+    // Sanitize filename to prevent path traversal
+    const sanitized = path.basename(filename);
+    const filepath = path.join(this.dumpDir, sanitized);
+
     let content = "=== GROWTOPIA PACKET DUMP ===\n";
     content += `Generated: ${new Date().toISOString()}\n`;
     content += `Total packets: ${this.packets.length}\n\n`;
