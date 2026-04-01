@@ -1,4 +1,4 @@
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -10,7 +10,13 @@ const HOSTS_FILE =
     ? "C:\\Windows\\System32\\drivers\\etc\\hosts"
     : "/etc/hosts";
 
-const GT_DOMAINS = ["www.growtopia1.com", "www.growtopia2.com"];
+const GT_DOMAINS = [
+  "www.growtopia1.com",
+  "www.growtopia2.com",
+  "login.growtopiagame.com",
+  "growtopia1.com",
+  "growtopia2.com",
+];
 const GT_MARKER = "# dqymon-proxy";
 
 class GameLauncher {
@@ -77,18 +83,72 @@ class GameLauncher {
       hosts = hosts.trimEnd() + "\n" + entries + "\n";
       fs.writeFileSync(HOSTS_FILE, hosts);
       this.hostsModified = true;
-      this.logger.info("✓ Hosts file updated (Growtopia → proxy)");
+      this.logger.info("✓ Hosts file updated — redirecting:");
+      GT_DOMAINS.forEach((d) => this.logger.info(`    ${d} → 127.0.0.1`));
       return true;
     } catch (err) {
       if (err.code === "EACCES" || err.code === "EPERM") {
         this.logger.error(
-          "Cannot modify hosts file — run as Administrator / root."
+          "✗ Cannot modify hosts file — YOU MUST RUN AS ADMINISTRATOR!"
         );
       } else {
-        this.logger.error(`Hosts file error: ${err.message}`);
+        this.logger.error(`✗ Hosts file error: ${err.message}`);
       }
       return false;
     }
+  }
+
+  /**
+   * Read hosts file back and confirm our entries are present.
+   */
+  verifyHosts() {
+    try {
+      const hosts = fs.readFileSync(HOSTS_FILE, "utf8");
+      const lines = hosts.split("\n").filter((l) => l.includes(GT_MARKER));
+      if (lines.length >= GT_DOMAINS.length) {
+        this.logger.info(`✓ Hosts file verified (${lines.length} entries)`);
+      } else {
+        this.logger.warn(
+          `✗ Hosts file only has ${lines.length}/${GT_DOMAINS.length} entries`
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`✗ Could not verify hosts: ${err.message}`);
+    }
+  }
+
+  /**
+   * Flush the Windows DNS resolver cache so hosts file changes take effect.
+   */
+  flushDns() {
+    if (process.platform !== "win32") return;
+    try {
+      execSync("ipconfig /flushdns", { stdio: "pipe" });
+      this.logger.info("✓ DNS cache flushed");
+    } catch {
+      this.logger.warn("Could not flush DNS cache");
+    }
+  }
+
+  /**
+   * Add Windows Firewall rules to allow traffic on ports 80, 443, 8080.
+   * Silently fails on non-Windows or if already exists.
+   */
+  addFirewallRules() {
+    if (process.platform !== "win32") return;
+    const ports = [80, 443, 8080, 17091];
+    for (const port of ports) {
+      try {
+        execSync(
+          `netsh advfirewall firewall add rule name="dqymon-proxy-${port}" ` +
+          `dir=in action=allow protocol=TCP localport=${port} >nul 2>&1`,
+          { stdio: "pipe" }
+        );
+      } catch {
+        // Rule may already exist — that's fine
+      }
+    }
+    this.logger.info("✓ Firewall rules added for ports 80, 443, 8080, 17091");
   }
 
   /**

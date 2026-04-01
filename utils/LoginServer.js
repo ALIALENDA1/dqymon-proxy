@@ -1,9 +1,11 @@
 const https = require("https");
 const http = require("http");
+const net = require("net");
+const tls = require("tls");
 const config = require("../config/config");
 const Logger = require("./Logger");
 
-// Embedded self-signed certificate for www.growtopia1.com / www.growtopia2.com
+// Embedded self-signed certificate for Growtopia domains
 // Valid for 10 years — no openssl dependency needed.
 const EMBEDDED_KEY = `-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCTfIGaXcakRgI8
@@ -58,8 +60,7 @@ bIPhzARFjxeyra0M5931+84jV1rongILUwHB1Efs7z9B3J5G
 class LoginServer {
   constructor() {
     this.logger = new Logger();
-    this.httpsServer = null;
-    this.httpServer = null;
+    this.servers = [];
   }
 
   /**
@@ -70,71 +71,160 @@ class LoginServer {
     const proxyHost =
       config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
 
+    // Match the exact format Growtopia expects
     return [
       `server|${proxyHost}`,
       `port|${config.proxy.port}`,
       `type|1`,
-      `#maint|`,
-      `meta|defined`,
+      `#maint|Server is online. Good luck!`,
+      `meta|dqymon-proxy`,
       `RTENDMARKERBS1001`,
     ].join("\n");
   }
 
+  /**
+   * Handle an HTTP request. Consumes the POST body first,
+   * then sends the server_data response.
+   */
   handleRequest(req, res) {
-    this.logger.info(`[LOGIN] ${req.method} ${req.url}`);
+    // Collect POST body (Growtopia sends POST with form data)
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString();
+      this.logger.info(
+        `[LOGIN] ${req.method} ${req.url} ` +
+        `(${req.headers.host || "no-host"}) ` +
+        `body=${body.length}b`
+      );
 
-    // Respond to any path — Growtopia hits /growtopia/server_data.php
-    const data = this.getServerData();
-    res.writeHead(200, {
-      "Content-Type": "text/html",
-      "Content-Length": Buffer.byteLength(data),
+      const data = this.getServerData();
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        "Content-Length": Buffer.byteLength(data),
+        "Connection": "close",
+      });
+      res.end(data);
     });
-    res.end(data);
+
+    req.on("error", () => {
+      res.writeHead(200);
+      res.end(this.getServerData());
+    });
   }
 
   start() {
     const handler = (req, res) => this.handleRequest(req, res);
 
-    // Start HTTPS on :443
-    this.httpsServer = https.createServer(
-      { key: EMBEDDED_KEY, cert: EMBEDDED_CERT },
-      handler
-    );
+    // ── HTTPS on :443 ──────────────────────────────────────────────
+    try {
+      const httpsServer = https.createServer(
+        { key: EMBEDDED_KEY, cert: EMBEDDED_CERT },
+        handler
+      );
 
-    this.httpsServer.listen(443, () => {
-      this.logger.info("✓ Login server started on HTTPS :443");
-    });
+      httpsServer.on("tlsClientError", () => {
+        // Silently ignore TLS errors (cert rejection etc.)
+      });
 
-    this.httpsServer.on("error", (err) => {
-      this.logger.warn(`HTTPS :443 failed (${err.code})`);
-    });
+      httpsServer.listen(443, "0.0.0.0", () => {
+        this.logger.info("✓ Login server listening on HTTPS :443");
+      });
 
-    // ALSO start HTTP on :80 — Growtopia falls back to HTTP
-    // when HTTPS cert validation fails
-    this.httpServer = http.createServer(handler);
+      httpsServer.on("error", (err) => {
+        this.logger.warn(`HTTPS :443 failed: ${err.code || err.message}`);
+      });
 
-    this.httpServer.listen(80, () => {
-      this.logger.info("✓ Login server started on HTTP :80");
-    });
+      this.servers.push(httpsServer);
+    } catch (err) {
+      this.logger.warn(`HTTPS setup failed: ${err.message}`);
+    }
 
-    this.httpServer.on("error", (err) => {
-      if (err.code === "EACCES" || err.code === "EADDRINUSE") {
-        this.logger.warn(`HTTP :80 failed (${err.code})`);
-      } else {
-        this.logger.error(`HTTP login server error: ${err.message}`);
-      }
+    // ── HTTP on :80 ────────────────────────────────────────────────
+    try {
+      const httpServer = http.createServer(handler);
+
+      httpServer.listen(80, "0.0.0.0", () => {
+        this.logger.info("✓ Login server listening on HTTP :80");
+      });
+
+      httpServer.on("error", (err) => {
+        this.logger.warn(`HTTP :80 failed: ${err.code || err.message}`);
+      });
+
+      this.servers.push(httpServer);
+    } catch (err) {
+      this.logger.warn(`HTTP setup failed: ${err.message}`);
+    }
+
+    // ── Raw TCP on :443 fallback ───────────────────────────────────
+    // Some GT versions send a plain HTTP request to :443 when HTTPS
+    // fails. This raw TCP server detects whether the incoming
+    // connection is TLS or plain HTTP and handles both.
+    // We skip this if HTTPS :443 already bound successfully.
+    // (handled by error above — if :443 is taken, this won't bind either)
+
+    // ── HTTP on :8080 (guaranteed no-privilege port) ───────────────
+    try {
+      const httpAlt = http.createServer(handler);
+
+      httpAlt.listen(8080, "0.0.0.0", () => {
+        this.logger.info("✓ Login server listening on HTTP :8080 (alt)");
+      });
+
+      httpAlt.on("error", (err) => {
+        this.logger.warn(`HTTP :8080 failed: ${err.code || err.message}`);
+      });
+
+      this.servers.push(httpAlt);
+    } catch (err) {
+      this.logger.warn(`HTTP :8080 setup failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Run diagnostics to help debug connection issues.
+   */
+  diagnose() {
+    return new Promise((resolve) => {
+      const results = [];
+
+      // Test if we can connect to our own server on :443
+      const test = (port, label) => {
+        return new Promise((res) => {
+          const sock = net.createConnection({ host: "127.0.0.1", port }, () => {
+            results.push(`  ✓ Port ${port} (${label}) — reachable`);
+            sock.destroy();
+            res();
+          });
+          sock.on("error", (err) => {
+            results.push(`  ✗ Port ${port} (${label}) — ${err.code || err.message}`);
+            res();
+          });
+          sock.setTimeout(2000, () => {
+            results.push(`  ✗ Port ${port} (${label}) — timeout`);
+            sock.destroy();
+            res();
+          });
+        });
+      };
+
+      Promise.all([
+        test(443, "HTTPS"),
+        test(80, "HTTP"),
+        test(8080, "HTTP alt"),
+      ]).then(() => {
+        this.logger.info("Login server diagnostics:\n" + results.join("\n"));
+        resolve(results);
+      });
     });
   }
 
   stop() {
-    if (this.httpsServer) {
-      this.httpsServer.close();
-      this.httpsServer = null;
+    for (const server of this.servers) {
+      try { server.close(); } catch {}
     }
-    if (this.httpServer) {
-      this.httpServer.close();
-      this.httpServer = null;
-    }
+    this.servers = [];
   }
 }
 

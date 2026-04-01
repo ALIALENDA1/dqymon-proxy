@@ -334,9 +334,22 @@ proxy.start();
 // 2. Start the fake login server (serves server_data.php → proxy)
 loginServer.start();
 
-// 3. Redirect Growtopia domains to 127.0.0.1 & launch the game
+// 3. Run diagnostics after servers are up
+setTimeout(() => {
+  loginServer.diagnose();
+}, 2000);
+
+// 4. Redirect Growtopia domains to 127.0.0.1 & launch the game
 if (config.game && config.game.modifyHosts !== false) {
-  gameLauncher.modifyHosts();
+  const hostsOk = gameLauncher.modifyHosts();
+  if (hostsOk) {
+    // Verify the hosts file was written correctly
+    gameLauncher.verifyHosts();
+    // Flush DNS cache so Windows picks up the new hosts entries immediately
+    gameLauncher.flushDns();
+    // Add firewall rules so Windows doesn't block our ports
+    gameLauncher.addFirewallRules();
+  }
 }
 
 if (config.game && config.game.autoLaunch !== false) {
