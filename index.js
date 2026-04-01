@@ -77,6 +77,11 @@ class GrowtopiaProxy {
         );
       }
 
+      // Detailed ENet diagnostic for the very first packet
+      if (session.clientPackets === 1) {
+        this.logENetDiagnostic(session, msg);
+      }
+
       // Inspect Growtopia payloads inside the ENet datagram
       const modified = this.inspectClientDatagram(session, msg);
 
@@ -148,6 +153,8 @@ class GrowtopiaProxy {
         logger.warn(
           `[${clientId}] ⚠ The server may be in maintenance, or outbound UDP is blocked.`
         );
+        // Run a direct probe to confirm
+        this.probeServer(serverHost, serverPort);
       }
     }, 10000);
 
@@ -190,6 +197,154 @@ class GrowtopiaProxy {
 
     this.sessions.set(clientKey, session);
     logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
+
+    // If we know the server is in maintenance, warn immediately
+    if (this.loginServer && this.loginServer.maintenanceDetected) {
+      logger.warn(`[${clientId}] ⚠ GT server is in MAINTENANCE MODE — connection will likely time out`);
+    }
+  }
+
+  // ── ENet diagnostics ─────────────────────────────────────────────
+
+  /**
+   * Parse and log detailed information about the first ENet packet
+   * to verify it's a valid CONNECT and help debug connection failures.
+   */
+  logENetDiagnostic(session, buf) {
+    const hex = buf.slice(0, Math.min(buf.length, 64)).toString("hex").match(/.{1,2}/g).join(" ");
+    logger.info(`[${session.clientId}] ENet hex (first ${Math.min(buf.length, 64)}b): ${hex}`);
+
+    if (buf.length < 4) {
+      logger.warn(`[${session.clientId}] ENet: packet too small (${buf.length} bytes)`);
+      return;
+    }
+
+    const peerID = buf.readUInt16BE(0);
+    const hasSentTime = !!(peerID & 0x8000);
+    const isCompressed = !!(peerID & 0x4000);
+    const rawPeerID = peerID & 0x0FFF;
+
+    logger.info(
+      `[${session.clientId}] ENet header: peerID=${rawPeerID} sentTime=${hasSentTime} compressed=${isCompressed}`
+    );
+
+    if (isCompressed) {
+      logger.warn(`[${session.clientId}] ENet: compressed datagram — cannot inspect further`);
+      return;
+    }
+
+    let offset = 2 + (hasSentTime ? 2 : 0);
+
+    // Try parsing: ENet without checksum first, then with
+    let cmdByte = buf.length > offset ? buf[offset] : 0;
+    let cmdType = cmdByte & 0x0F;
+    let hasChecksum = false;
+
+    if (cmdType < 1 || cmdType > 12) {
+      // Maybe has a 4-byte checksum before commands
+      if (buf.length > offset + 4) {
+        const checksum = buf.readUInt32LE(offset);
+        offset += 4;
+        cmdByte = buf[offset];
+        cmdType = cmdByte & 0x0F;
+        hasChecksum = true;
+        logger.info(`[${session.clientId}] ENet: CRC32 checksum present (0x${checksum.toString(16)})`);
+      }
+    }
+
+    if (cmdType >= 1 && cmdType <= 12) {
+      const cmdNames = {
+        1: "ACKNOWLEDGE", 2: "CONNECT", 3: "VERIFY_CONNECT",
+        4: "DISCONNECT", 5: "PING", 6: "SEND_RELIABLE",
+        7: "SEND_UNRELIABLE", 8: "SEND_FRAGMENT", 9: "SEND_UNSEQUENCED",
+      };
+      const flags = [];
+      if (cmdByte & 0x80) flags.push("ACK");
+      if (cmdByte & 0x40) flags.push("UNSEQUENCED");
+
+      logger.info(
+        `[${session.clientId}] ENet cmd: ${cmdNames[cmdType] || `UNKNOWN(${cmdType})`} ` +
+        `flags=[${flags.join(",")}] checksum=${hasChecksum}`
+      );
+
+      // For CONNECT, parse key fields
+      if (cmdType === 2 && buf.length >= offset + 4 + 36) {
+        const channelID = buf[offset + 1];
+        const relSeq = buf.readUInt16BE(offset + 2);
+        const connectStart = offset + 4;
+        const outgoingPeerID = buf.readUInt16BE(connectStart);
+        const mtu = buf.readUInt32BE(connectStart + 4);
+        const windowSize = buf.readUInt32BE(connectStart + 8);
+        const channelCount = buf.readUInt32BE(connectStart + 12);
+        const connectID = buf.readUInt32BE(connectStart + 32);
+        logger.info(
+          `[${session.clientId}] CONNECT: outPeerID=${outgoingPeerID} ch=${channelID} ` +
+          `seq=${relSeq} mtu=${mtu} wnd=${windowSize} channels=${channelCount} ` +
+          `connectID=0x${connectID.toString(16)}`
+        );
+      }
+    } else {
+      logger.warn(
+        `[${session.clientId}] ENet: cannot parse first command byte 0x${cmdByte.toString(16)} — ` +
+        `may be compressed or unknown protocol`
+      );
+    }
+  }
+
+  /**
+   * Probe the GT server by sending a minimal ENet CONNECT-like packet
+   * from a separate socket to verify UDP reachability.
+   */
+  probeServer(host, port) {
+    return new Promise((resolve) => {
+      const probe = dgram.createSocket("udp4");
+      let responded = false;
+
+      probe.on("message", () => {
+        responded = true;
+        logger.info(`[PROBE] ✓ GT server ${host}:${port} responded to UDP probe`);
+        probe.close();
+        resolve(true);
+      });
+
+      probe.on("error", (err) => {
+        logger.warn(`[PROBE] Probe socket error: ${err.message}`);
+        if (!responded) resolve(false);
+      });
+
+      // Send a minimal ENet CONNECT (44 bytes: peerID + sentTime + CONNECT command)
+      const buf = Buffer.alloc(44);
+      buf.writeUInt16BE(0x8FFF, 0);  // peerID=0xFFF with sentTime flag
+      buf.writeUInt16BE(0, 2);        // sentTime=0
+      buf[4] = 0x82;                  // CONNECT | ACK flag
+      buf[5] = 0xFF;                  // channelID
+      buf.writeUInt16BE(1, 6);        // reliableSeqNum=1
+      // connect data (36 bytes) — MTU=1400
+      buf.writeUInt32BE(1400, 12);    // MTU
+      buf.writeUInt32BE(32768, 16);   // windowSize
+      buf.writeUInt32BE(2, 20);       // channelCount
+      // bytes 24-43: bandwidths, throttle, connectID = 0 (fine for probe)
+
+      probe.send(buf, port, host, (err) => {
+        if (err) {
+          logger.warn(`[PROBE] Failed to send probe to ${host}:${port}: ${err.message}`);
+          resolve(false);
+          return;
+        }
+        logger.info(`[PROBE] Sent UDP probe (44b) to ${host}:${port} — waiting 5s for response...`);
+      });
+
+      // Give it 5 seconds
+      setTimeout(() => {
+        if (!responded) {
+          logger.warn(`[PROBE] ✗ No UDP response from ${host}:${port} after 5s`);
+          logger.warn(`[PROBE] This confirms the GT server is not accepting ENet connections`);
+          logger.warn(`[PROBE] (likely maintenance mode — #maint was in server_data)`);
+          try { probe.close(); } catch (e) {}
+          resolve(false);
+        }
+      }, 5000);
+    });
   }
 
   // ── Datagram inspection ───────────────────────────────────────────

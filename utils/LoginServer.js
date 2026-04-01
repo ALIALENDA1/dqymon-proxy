@@ -229,8 +229,11 @@ class LoginServer {
             // Detect maintenance mode and warn prominently
             const maintMatch = body.match(/^#maint\|(.+)$/m);
             if (maintMatch) {
+              this.maintenanceDetected = true;
               this.logger.warn(`[LOGIN] ⚠ SERVER IS IN MAINTENANCE: ${maintMatch[1].trim()}`);
               this.logger.warn(`[LOGIN] ⚠ ENet connections will likely time out until maintenance ends!`);
+            } else {
+              this.maintenanceDetected = false;
             }
 
             // Log the original response before modification
