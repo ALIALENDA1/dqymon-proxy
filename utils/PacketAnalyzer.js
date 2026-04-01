@@ -7,13 +7,18 @@ const fs = require("fs");
 const path = require("path");
 const Logger = require("./Logger");
 
+// In a pkg snapshot, __dirname is read-only. Use the exe's folder instead.
+const APP_DIR = process.pkg
+  ? path.dirname(process.execPath)
+  : path.join(__dirname, "..");
+
 class PacketAnalyzer {
   constructor() {
     this.logger = new Logger();
     this.packets = [];
-    this.dumpDir = path.join(__dirname, "..", "packet_dumps");
+    this.dumpDir = path.join(APP_DIR, "packet_dumps");
 
-    // Create dump directory jika tidak ada
+    // Create dump directory if it doesn't exist
     if (!fs.existsSync(this.dumpDir)) {
       fs.mkdirSync(this.dumpDir, { recursive: true });
     }

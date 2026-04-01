@@ -6,11 +6,16 @@ const path = require("path");
 const config = require("../config/config");
 const Logger = require("./Logger");
 
+// In a pkg snapshot, __dirname is read-only. Use the exe's folder instead.
+const APP_DIR = process.pkg
+  ? path.dirname(process.execPath)
+  : path.join(__dirname, "..");
+
 class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.server = null;
-    this.certDir = path.join(__dirname, "..", "certs");
+    this.certDir = path.join(APP_DIR, "certs");
   }
 
   /**
