@@ -68,10 +68,12 @@ class GrowtopiaProxy {
 
       const session = this.sessions.get(clientKey);
       session.lastActivity = Date.now();
+      session.clientPackets = (session.clientPackets || 0) + 1;
 
-      if (config.logging.enabled) {
-        logger.debug(
-          `[${session.clientId}] Client → Server: ${msg.length} bytes`
+      // Log first few packets and then periodically at info level
+      if (session.clientPackets <= 3 || session.clientPackets % 50 === 0) {
+        logger.info(
+          `[${session.clientId}] Client → Server: ${msg.length} bytes (pkt #${session.clientPackets})`
         );
       }
 
@@ -81,7 +83,12 @@ class GrowtopiaProxy {
       // Forward to real GT server
       session.serverSocket.send(
         modified, 0, modified.length,
-        session.serverPort, session.serverHost
+        session.serverPort, session.serverHost,
+        (err) => {
+          if (err) {
+            logger.error(`[${session.clientId}] Failed to send to GT server: ${err.message}`);
+          }
+        }
       );
     });
 
@@ -135,10 +142,12 @@ class GrowtopiaProxy {
     // Server → Client relay
     serverSocket.on("message", (serverMsg, serverInfo) => {
       session.lastActivity = Date.now();
+      session.serverPackets = (session.serverPackets || 0) + 1;
 
-      if (config.logging.enabled) {
-        logger.debug(
-          `[${clientId}] Server → Client: ${serverMsg.length} bytes`
+      // Log first few packets and then periodically at info level
+      if (session.serverPackets <= 3 || session.serverPackets % 50 === 0) {
+        logger.info(
+          `[${clientId}] Server → Client: ${serverMsg.length} bytes from ${serverInfo.address}:${serverInfo.port} (pkt #${session.serverPackets})`
         );
       }
 
@@ -148,12 +157,23 @@ class GrowtopiaProxy {
       // Relay back to the game client via the main proxy socket
       this.proxySocket.send(
         modified, 0, modified.length,
-        session.clientPort, session.clientAddr
+        session.clientPort, session.clientAddr,
+        (err) => {
+          if (err) {
+            logger.error(`[${clientId}] Failed to send to client: ${err.message}`);
+          }
+        }
       );
     });
 
     serverSocket.on("error", (err) => {
-      logger.debug(`[${clientId}] Server socket error: ${err.message}`);
+      logger.error(`[${clientId}] Server socket error: ${err.message}`);
+    });
+
+    // Log when the server socket is ready
+    serverSocket.on("listening", () => {
+      const addr = serverSocket.address();
+      logger.info(`[${clientId}] Server socket bound to ${addr.address}:${addr.port}`);
     });
 
     this.sessions.set(clientKey, session);
