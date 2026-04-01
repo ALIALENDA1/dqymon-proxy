@@ -23,31 +23,30 @@ class LoginServer {
    * Requires openssl in PATH. Returns null if unavailable.
    */
   generateCert() {
-    if (!fs.existsSync(this.certDir)) {
-      fs.mkdirSync(this.certDir, { recursive: true });
-    }
-
-    const keyPath = path.join(this.certDir, "key.pem");
-    const certPath = path.join(this.certDir, "cert.pem");
-
-    if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
-      return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
-    }
-
     try {
+      if (!fs.existsSync(this.certDir)) {
+        fs.mkdirSync(this.certDir, { recursive: true });
+      }
+
+      const keyPath = path.join(this.certDir, "key.pem");
+      const certPath = path.join(this.certDir, "cert.pem");
+
+      if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+        return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+      }
+
       const subj = "/CN=www.growtopia1.com";
       const san = "subjectAltName=DNS:www.growtopia1.com,DNS:www.growtopia2.com";
       execSync(
         `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" ` +
-          `-days 365 -nodes -subj "${subj}" -addext "${san}" 2>/dev/null`,
+          `-days 365 -nodes -subj "${subj}" -addext "${san}" 2>nul`,
         { stdio: "pipe" }
       );
       this.logger.info("✓ Generated self-signed certificate");
       return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
     } catch {
       this.logger.warn(
-        "openssl not found — falling back to HTTP only. " +
-          "If Growtopia requires HTTPS, install openssl and restart."
+        "Certificate generation skipped — falling back to HTTP only."
       );
       return null;
     }
