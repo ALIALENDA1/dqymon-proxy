@@ -1,7 +1,6 @@
 const https = require("https");
 const http = require("http");
 const net = require("net");
-const tls = require("tls");
 const config = require("../config/config");
 const Logger = require("./Logger");
 
@@ -61,17 +60,105 @@ class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.servers = [];
+    // The real Growtopia login URLs to try (in order)
+    this.realLoginUrls = [
+      "https://www.growtopia1.com/growtopia/server_data.php",
+      "https://www.growtopia2.com/growtopia/server_data.php",
+      "https://login.growtopiagame.com/growtopia/server_data.php",
+    ];
   }
 
   /**
-   * Build the server_data.php response that tells Growtopia
-   * to connect to the proxy instead of the real server.
+   * Fetch server_data from the REAL Growtopia server, then replace
+   * the server/port with our proxy address. This ensures GT gets a
+   * 100% valid response with all fields (loginurl, token, etc.)
    */
-  getServerData() {
+  fetchAndModifyServerData(postBody) {
+    return new Promise((resolve) => {
+      const proxyHost =
+        config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
+
+      const tryUrl = (index) => {
+        if (index >= this.realLoginUrls.length) {
+          // All URLs failed — return a basic fallback
+          this.logger.warn("[LOGIN] All real GT servers unreachable, using fallback");
+          resolve(this.getFallbackServerData());
+          return;
+        }
+
+        const url = this.realLoginUrls[index];
+        this.logger.info(`[LOGIN] Forwarding to real server: ${url}`);
+
+        const urlObj = new URL(url);
+        const reqOpts = {
+          hostname: urlObj.hostname,
+          port: 443,
+          path: urlObj.pathname,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "UbiServices_SDK_2019.Release.27_PC64_ansi_static",
+            "Content-Length": Buffer.byteLength(postBody),
+          },
+          timeout: 8000,
+          rejectAuthorized: false,
+        };
+
+        const req = https.request(reqOpts, (resp) => {
+          const chunks = [];
+          resp.on("data", (c) => chunks.push(c));
+          resp.on("end", () => {
+            let body = Buffer.concat(chunks).toString();
+            this.logger.info(
+              `[LOGIN] Real server responded: ${resp.statusCode} (${body.length}b)`
+            );
+
+            if (resp.statusCode !== 200 || body.length < 20) {
+              tryUrl(index + 1);
+              return;
+            }
+
+            // Replace server + port with proxy address
+            body = body.replace(
+              /^server\|.+$/m,
+              `server|${proxyHost}`
+            );
+            body = body.replace(
+              /^port\|.+$/m,
+              `port|${config.proxy.port}`
+            );
+
+            this.logger.info("[LOGIN] Modified server_data → proxy address");
+            resolve(body);
+          });
+        });
+
+        req.on("error", (err) => {
+          this.logger.warn(`[LOGIN] ${urlObj.hostname} failed: ${err.message}`);
+          tryUrl(index + 1);
+        });
+
+        req.on("timeout", () => {
+          this.logger.warn(`[LOGIN] ${urlObj.hostname} timed out`);
+          req.destroy();
+          tryUrl(index + 1);
+        });
+
+        req.write(postBody);
+        req.end();
+      };
+
+      tryUrl(0);
+    });
+  }
+
+  /**
+   * Fallback server_data when real GT servers can't be reached.
+   */
+  getFallbackServerData() {
     const proxyHost =
       config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
 
-    // Match the exact format Growtopia expects
     return [
       `server|${proxyHost}`,
       `port|${config.proxy.port}`,
@@ -83,33 +170,46 @@ class LoginServer {
   }
 
   /**
-   * Handle an HTTP request. Consumes the POST body first,
-   * then sends the server_data response.
+   * Handle an HTTP request. Forwards to the real GT login server,
+   * modifies the response, and sends it back to the game.
    */
   handleRequest(req, res) {
     // Collect POST body (Growtopia sends POST with form data)
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
-      const body = Buffer.concat(chunks).toString();
+      const postBody = Buffer.concat(chunks).toString();
       this.logger.info(
         `[LOGIN] ${req.method} ${req.url} ` +
         `(${req.headers.host || "no-host"}) ` +
-        `body=${body.length}b`
+        `body=${postBody.length}b`
       );
 
-      const data = this.getServerData();
-      res.writeHead(200, {
-        "Content-Type": "text/html",
-        "Content-Length": Buffer.byteLength(data),
-        "Connection": "close",
-      });
-      res.end(data);
+      this.fetchAndModifyServerData(postBody)
+        .then((data) => {
+          res.writeHead(200, {
+            "Content-Type": "text/html",
+            "Content-Length": Buffer.byteLength(data),
+            "Connection": "close",
+          });
+          res.end(data);
+          this.logger.info(`[LOGIN] Sent modified server_data (${data.length}b)`);
+        })
+        .catch((err) => {
+          this.logger.error(`[LOGIN] Handler error: ${err.message}`);
+          const fallback = this.getFallbackServerData();
+          res.writeHead(200, {
+            "Content-Type": "text/html",
+            "Content-Length": Buffer.byteLength(fallback),
+          });
+          res.end(fallback);
+        });
     });
 
     req.on("error", () => {
+      const fallback = this.getFallbackServerData();
       res.writeHead(200);
-      res.end(this.getServerData());
+      res.end(fallback);
     });
   }
 
