@@ -28,7 +28,7 @@ process.on("unhandledRejection", async (err) => {
 
 try {
 
-const enet = require("enet");
+const dgram = require("dgram");
 const crypto = require("crypto");
 const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
@@ -36,108 +36,80 @@ const CommandHandler = require("./handlers/CommandHandler");
 const Logger = require("./utils/Logger");
 const LoginServer = require("./utils/LoginServer");
 const GameLauncher = require("./utils/GameLauncher");
+const ENetParser = require("./utils/ENetParser");
 
 const logger = new Logger();
 
+// Session timeout: clean up sessions with no activity for 60 seconds
+const SESSION_TIMEOUT_MS = 60 * 1000;
+
 class GrowtopiaProxy {
   constructor() {
-    this.sessions = new Map();    // clientId -> { clientPeer, serverHost, serverPeer, pendingServer }
-    this.peerToClient = new Map(); // peer pointer -> clientId
+    // clientKey ("addr:port") → session object
+    this.sessions = new Map();
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
-    this.proxyHost = null;
+    this.proxySocket = null;       // Main UDP socket (client ↔ proxy)
     this.loginServer = null;       // set after construction
-    // Queue of pending sub-server redirects (survives session cleanup).
-    // When a sub-server redirect is intercepted, the real target is pushed here.
-    // On the next client connection, it is consumed.
+    // Queue of pending sub-server redirects (survives session teardown).
     this.pendingServerQueue = [];
   }
 
   start() {
-    const addr = new enet.Address({
-      address: config.proxy.host,
-      port: config.proxy.port,
+    this.proxySocket = dgram.createSocket("udp4");
+
+    this.proxySocket.on("message", (msg, rinfo) => {
+      const clientKey = `${rinfo.address}:${rinfo.port}`;
+
+      // Create session on first packet from this client
+      if (!this.sessions.has(clientKey)) {
+        this.createSession(clientKey, rinfo);
+      }
+
+      const session = this.sessions.get(clientKey);
+      session.lastActivity = Date.now();
+
+      if (config.logging.enabled) {
+        logger.debug(
+          `[${session.clientId}] Client → Server: ${msg.length} bytes`
+        );
+      }
+
+      // Inspect Growtopia payloads inside the ENet datagram
+      const modified = this.inspectClientDatagram(session, msg);
+
+      // Forward to real GT server
+      session.serverSocket.send(
+        modified, 0, modified.length,
+        session.serverPort, session.serverHost
+      );
     });
 
-    this.proxyHost = enet.createServer(
-      {
-        address: addr,
-        peers: config.proxy.maxPeers || 32,
-        channels: config.proxy.channels || 2,
-        down: 0,
-        up: 0,
-      },
-      (err, host) => {
-        if (err) {
-          logger.error(`Failed to start ENet server: ${err.message || err}`);
-          return;
-        }
+    this.proxySocket.on("error", (err) => {
+      logger.error(`Proxy socket error: ${err.message}`);
+    });
 
-        logger.info(
-          `✓ ENet proxy started on ${config.proxy.host}:${config.proxy.port}`
-        );
+    this.proxySocket.bind(config.proxy.port, config.proxy.host, () => {
+      logger.info(
+        `✓ UDP proxy started on ${config.proxy.host}:${config.proxy.port}`
+      );
+    });
 
-        // Incoming client connection
-        host.on("connect", (clientPeer) => {
-          const clientId = this.generateClientId();
-          logger.info(`[CLIENT] New ENet connection: ${clientId}`);
-
-          this.peerToClient.set(clientPeer._pointer, clientId);
-          this.sessions.set(clientId, { clientPeer, serverHost: null, serverPeer: null });
-
-          // Create a separate ENet client host to connect to the real GT server
-          this.connectToServer(clientId);
-        });
-
-        // Client disconnected
-        host.on("disconnect", (clientPeer) => {
-          const clientId = this.peerToClient.get(clientPeer._pointer);
-          if (!clientId) return;
-          logger.info(`[CLIENT] Disconnected: ${clientId}`);
-          this.cleanup(clientId);
-        });
-
-        // Incoming data from a client
-        host.on("message", (clientPeer, packet, channelId) => {
-          const clientId = this.peerToClient.get(clientPeer._pointer);
-          if (!clientId) return;
-
-          const data = packet.data();
-
-          if (config.logging.enabled) {
-            logger.debug(
-              `[${clientId}] Client -> Server (ch${channelId}): ${data.length} bytes`
-            );
-          }
-
-          // Process commands / modify packet
-          const processedData = this.handleClientData(clientId, data);
-
-          // Forward to real GT server
-          const session = this.sessions.get(clientId);
-          if (processedData && session && session.serverPeer) {
-            const fwdPacket = new enet.Packet(processedData, enet.PACKET_FLAG.RELIABLE);
-            session.serverPeer.send(channelId, fwdPacket);
-          }
-        });
-
-        host.start(10); // Service every 10ms
-      }
-    );
+    // Periodically clean up stale sessions
+    setInterval(() => this.cleanupStaleSessions(), 15000);
   }
 
   /**
-   * Create an ENet client that connects to the real Growtopia server
-   * and relays traffic back to the game client.
+   * Create a new session for a client. Allocates a dedicated server-side
+   * UDP socket so each client has an isolated connection to the GT server.
    */
-  connectToServer(clientId) {
-    const session = this.sessions.get(clientId);
-    if (!session) return;
+  createSession(clientKey, rinfo) {
+    const clientId = crypto.randomBytes(6).toString("hex");
 
-    // Use pending sub-server redirect, then login response, then static config.
+    // Determine target server: pending redirect → login response → static config
     let serverHost, serverPort;
     if (this.pendingServerQueue.length > 0) {
-      const pending = this.pendingServerQueue.shift(); // consume oldest
+      const pending = this.pendingServerQueue.shift();
       serverHost = pending.host;
       serverPort = pending.port;
     } else if (this.loginServer && this.loginServer.realServerHost) {
@@ -148,286 +120,250 @@ class GrowtopiaProxy {
       serverPort = config.serverConfig.port;
     }
 
-    logger.info(`[${clientId}] Connecting to real GT server at ${serverHost}:${serverPort}`);
+    const serverSocket = dgram.createSocket("udp4");
 
-    const serverHostEnet = enet.createClient(
-      {
-        peers: 1,
-        channels: config.serverConfig.channels || 2,
-        down: 0,
-        up: 0,
-      },
-      (err, host) => {
-        if (err) {
-          logger.error(
-            `[${clientId}] Failed to create ENet client: ${err.message || err}`
-          );
-          this.cleanup(clientId);
-          return;
-        }
+    const session = {
+      clientId,
+      clientAddr: rinfo.address,
+      clientPort: rinfo.port,
+      serverSocket,
+      serverHost,
+      serverPort,
+      lastActivity: Date.now(),
+    };
 
-        session.serverHost = host;
+    // Server → Client relay
+    serverSocket.on("message", (serverMsg, serverInfo) => {
+      session.lastActivity = Date.now();
 
-        const serverAddr = new enet.Address({
-          address: serverHost,
-          port: serverPort,
-        });
-
-        const serverPeer = host.connect(
-          serverAddr,
-          config.serverConfig.channels || 2,
-          0,
-          (err, peer) => {
-            if (err) {
-              logger.error(
-                `[${clientId}] Failed to connect to GT server at ${serverHost}:${serverPort}: ${err.message || err}`
-              );
-              this.cleanup(clientId);
-              return;
-            }
-
-            logger.info(`[${clientId}] Connected to GT server`);
-            session.serverPeer = peer;
-
-            // Send in-game status to client
-            this.sendStatus(clientId);
-          }
+      if (config.logging.enabled) {
+        logger.debug(
+          `[${clientId}] Server → Client: ${serverMsg.length} bytes`
         );
-
-        // Data from GT server -> relay to client
-        host.on("message", (serverPeer, packet, channelId) => {
-          const data = packet.data();
-
-          if (config.logging.enabled) {
-            logger.debug(
-              `[${clientId}] Server -> Client (ch${channelId}): ${data.length} bytes`
-            );
-          }
-
-          // Modify server response if needed
-          const modifiedData = this.handleServerData(clientId, data);
-
-          if (modifiedData && session.clientPeer) {
-            const fwdPacket = new enet.Packet(
-              modifiedData,
-              enet.PACKET_FLAG.RELIABLE
-            );
-            session.clientPeer.send(channelId, fwdPacket);
-          }
-        });
-
-        // Server disconnected
-        serverPeer.on("disconnect", () => {
-          logger.info(`[${clientId}] GT server disconnected`);
-          this.cleanup(clientId);
-        });
-
-        host.start(10);
       }
-    );
+
+      // Inspect/modify server-to-client traffic (OnSendToServer, etc.)
+      const modified = this.inspectServerDatagram(session, serverMsg);
+
+      // Relay back to the game client via the main proxy socket
+      this.proxySocket.send(
+        modified, 0, modified.length,
+        session.clientPort, session.clientAddr
+      );
+    });
+
+    serverSocket.on("error", (err) => {
+      logger.debug(`[${clientId}] Server socket error: ${err.message}`);
+    });
+
+    this.sessions.set(clientKey, session);
+    logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
   }
 
-  handleClientData(clientId, data) {
-    // Check for commands only in text-type packets
-    // Growtopia text packets (type 2/3) have ASCII content after a 4-byte header
-    if (data.length < 4) return data;
+  // ── Datagram inspection ───────────────────────────────────────────
+
+  /**
+   * Inspect a client-to-server datagram for Growtopia commands.
+   * Returns the (possibly modified) datagram buffer.
+   */
+  inspectClientDatagram(session, buf) {
+    try {
+      const payloads = ENetParser.extractPayloads(buf);
+      for (const { cmd, data } of payloads) {
+        this.handleClientPayload(session, data);
+      }
+    } catch (e) {
+      // Parsing failed — just relay unmodified
+    }
+    // Always forward the original datagram (commands are logged but not stripped,
+    // to avoid breaking ENet reliable sequence flow).
+    return buf;
+  }
+
+  /**
+   * Inspect a server-to-client datagram for OnSendToServer redirects.
+   * Returns the (possibly modified) datagram buffer.
+   */
+  inspectServerDatagram(session, buf) {
+    try {
+      const payloads = ENetParser.extractPayloads(buf);
+      for (const { cmd, data } of payloads) {
+        const modified = this.handleServerPayload(session, data);
+        if (modified && modified !== data) {
+          // Replace this payload in the ENet datagram
+          return ENetParser.replacePayload(buf, cmd, modified);
+        }
+      }
+    } catch (e) {
+      // Parsing failed — relay unmodified
+    }
+    return buf;
+  }
+
+  // ── Growtopia-level payload handlers ──────────────────────────────
+
+  /**
+   * Inspect a Growtopia payload from client→server traffic.
+   * Detects and logs commands.
+   */
+  handleClientPayload(session, data) {
+    if (data.length < 4) return;
 
     const msgType = data.readUInt32LE(0);
 
-    // Only check for commands in text packets (type 2 = login info, type 3 = action/text)
+    // Only look at text packets (type 2 = login info, type 3 = action/text)
     if (msgType === 2 || msgType === 3) {
       const text = data.toString("utf8", 4, Math.min(data.length, 260));
       const prefix = config.commands.prefix;
 
-      // Match command pattern: either direct "/command" or Growtopia chat format "|text|/command"
-      if (
-        text.startsWith(prefix) ||
-        text.includes(`|text|${prefix}`)
-      ) {
-        const result = this.commandHandler.execute(clientId, text);
+      if (text.startsWith(prefix) || text.includes(`|text|${prefix}`)) {
+        const result = this.commandHandler.execute(session.clientId, text);
         if (result.handled) {
-          logger.info(`[${clientId}] Command executed: ${result.command}`);
-          return result.data;
+          logger.info(`[${session.clientId}] Command executed: ${result.command}`);
         }
       }
     }
-
-    return data; // Pass through
   }
 
-  handleServerData(clientId, data) {
-    let modifiedData = data;
+  /**
+   * Inspect a Growtopia payload from server→client traffic.
+   * Intercepts OnSendToServer (sub-server redirects) and rewrites
+   * the target address to point back to our proxy.
+   * Returns modified payload Buffer, or the original if unchanged.
+   */
+  handleServerPayload(session, data) {
+    if (data.length <= 60) return data;
 
-    // Intercept OnSendToServer variant (sub-server redirect)
-    // The real GT server sends this to tell client to disconnect
-    // and reconnect to a different server IP:port.
-    // We need to rewrite it so the client reconnects to our proxy,
-    // and we store the real target to connect on their behalf.
-    if (data.length > 60) {
+    try {
+      const msgType = data.readUInt32LE(0);
+      if (msgType !== 4) return data; // Not a TANK packet
+
+      const tankType = data.readUInt32LE(4);
+      if (tankType !== 1) return data; // Not CALL_FUNCTION
+
+      const extraDataSize = data.readUInt32LE(56);
+      if (extraDataSize === 0 || data.length < 60 + extraDataSize) return data;
+
+      const extraData = data.slice(60);
+      const varCount = extraData.readUInt8(0);
+      if (varCount === 0) return data;
+
+      // Read first variant to get function name
+      let offset = 1; // skip count byte
+      offset += 1; // skip index
+      const type0 = extraData.readUInt8(offset); offset += 1;
+      if (type0 !== 2 || offset + 4 > extraData.length) return data;
+
+      const strLen = extraData.readUInt32LE(offset); offset += 4;
+      if (offset + strLen > extraData.length) return data;
+
+      const funcName = extraData.toString("utf8", offset, offset + strLen);
+      if (funcName !== "OnSendToServer") return data;
+
+      // Parse all variants: [0]=funcName, [1]=port, [2]=token, [3]=user, [4]=address
+      logger.info(`[${session.clientId}] Intercepted OnSendToServer`);
+
+      let realPort = 17091;
+      let realToken = 0;
+      let realUser = 0;
+      let realAddress = null;
+      let addressFull = "127.0.0.1|0|";
+
       try {
-        const msgType = data.readUInt32LE(0);
-        if (msgType === 4) { // TANK packet
-          const tankType = data.readUInt32LE(4);
-          if (tankType === 1) { // CALL_FUNCTION
-            const extraDataSize = data.readUInt32LE(56);
-            if (extraDataSize > 0 && data.length >= 60 + extraDataSize) {
-              const extraData = data.slice(60);
-              // Try to read variant function name
-              const varCount = extraData.readUInt8(0);
-              if (varCount > 0) {
-                // First variant: index(1) + type(1) + string
-                let offset = 1; // skip count byte
-                const idx0 = extraData.readUInt8(offset); offset += 1;
-                const type0 = extraData.readUInt8(offset); offset += 1;
-                if (type0 === 2 && offset + 4 <= extraData.length) { // string
-                  const strLen = extraData.readUInt32LE(offset); offset += 4;
-                  if (offset + strLen <= extraData.length) {
-                    const funcName = extraData.toString("utf8", offset, offset + strLen);
-                    offset += strLen;
-
-                    if (funcName === "OnSendToServer") {
-                      // Parse all variants: [0]=funcName, [1]=port, [2]=token, [3]=user, [4]=address
-                      logger.info(`[${clientId}] Intercepted OnSendToServer`);
-
-                      let realPort = 17091;
-                      let realToken = 0;
-                      let realUser = 0;
-                      let realAddress = null;
-                      let addressFull = "127.0.0.1|0|";
-
-                      try {
-                        let off2 = 1; // skip variant count byte
-                        for (let vi = 0; vi < varCount && off2 < extraData.length; vi++) {
-                          const vIdx = extraData.readUInt8(off2); off2 += 1;
-                          const vType = extraData.readUInt8(off2); off2 += 1;
-                          if (vType === 1) { off2 += 4; } // float
-                          else if (vType === 2) { // string
-                            const sLen = extraData.readUInt32LE(off2); off2 += 4;
-                            if (vIdx === 4) {
-                              addressFull = extraData.toString("utf8", off2, off2 + sLen);
-                              realAddress = addressFull.split("|")[0]; // "IP|doorId|uuid" → IP
-                            }
-                            off2 += sLen;
-                          }
-                          else if (vType === 3) { off2 += 8; } // vec2
-                          else if (vType === 4) { off2 += 12; } // vec3
-                          else if (vType === 5) {
-                            if (vIdx === 1) realPort = extraData.readUInt32LE(off2);
-                            else if (vIdx === 2) realToken = extraData.readUInt32LE(off2);
-                            else if (vIdx === 3) realUser = extraData.readUInt32LE(off2);
-                            off2 += 4;
-                          }
-                          else if (vType === 9) {
-                            if (vIdx === 1) realPort = extraData.readInt32LE(off2);
-                            else if (vIdx === 2) realToken = extraData.readInt32LE(off2);
-                            else if (vIdx === 3) realUser = extraData.readInt32LE(off2);
-                            off2 += 4;
-                          }
-                        }
-                      } catch (e) { /* parsing error, use defaults */ }
-
-                      if (realAddress) {
-                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
-                        // Store at proxy level so it survives the session disconnect/reconnect cycle
-                        this.pendingServerQueue.push({ host: realAddress, port: realPort });
-                      }
-
-                      // Rewrite: redirect client to our proxy, but preserve token + user
-                      const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
-                      // Replace only the IP in the address string, keep doorId and uuid
-                      const addrParts = addressFull.split("|");
-                      addrParts[0] = proxyHost;
-                      const rewrittenAddr = addrParts.join("|");
-
-                      modifiedData = PacketHandler.buildVariantPacket([
-                        { type: 2, value: "OnSendToServer" },
-                        { type: 9, value: config.proxy.port },     // port → proxy
-                        { type: 9, value: realToken },              // preserve real token
-                        { type: 9, value: realUser },               // preserve real user
-                        { type: 2, value: rewrittenAddr },          // address → proxy, keep doorId/uuid
-                      ], -1, 0);
-
-                      return modifiedData;
-                    }
-                  }
-                }
-              }
+        let off2 = 1;
+        for (let vi = 0; vi < varCount && off2 < extraData.length; vi++) {
+          const vIdx = extraData.readUInt8(off2); off2 += 1;
+          const vType = extraData.readUInt8(off2); off2 += 1;
+          if (vType === 1) { off2 += 4; }
+          else if (vType === 2) {
+            const sLen = extraData.readUInt32LE(off2); off2 += 4;
+            if (vIdx === 4) {
+              addressFull = extraData.toString("utf8", off2, off2 + sLen);
+              realAddress = addressFull.split("|")[0];
             }
+            off2 += sLen;
+          }
+          else if (vType === 3) { off2 += 8; }
+          else if (vType === 4) { off2 += 12; }
+          else if (vType === 5) {
+            if (vIdx === 1) realPort = extraData.readUInt32LE(off2);
+            else if (vIdx === 2) realToken = extraData.readUInt32LE(off2);
+            else if (vIdx === 3) realUser = extraData.readUInt32LE(off2);
+            off2 += 4;
+          }
+          else if (vType === 9) {
+            if (vIdx === 1) realPort = extraData.readInt32LE(off2);
+            else if (vIdx === 2) realToken = extraData.readInt32LE(off2);
+            else if (vIdx === 3) realUser = extraData.readInt32LE(off2);
+            off2 += 4;
           }
         }
-      } catch (e) {
-        // Failed to parse — pass through unmodified
+      } catch (e) { /* parsing error, use defaults */ }
+
+      if (realAddress) {
+        logger.info(`[${session.clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
+        this.pendingServerQueue.push({ host: realAddress, port: realPort });
       }
-    }
 
-    if (config.cheats.freeOutfit) {
-      modifiedData = this.packetHandler.injectItems(modifiedData, clientId);
-    }
+      // Rewrite: redirect client back to our proxy, preserving token/user/doorId
+      const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
+      const addrParts = addressFull.split("|");
+      addrParts[0] = proxyHost;
+      const rewrittenAddr = addrParts.join("|");
 
-    return modifiedData;
+      return PacketHandler.buildVariantPacket([
+        { type: 2, value: "OnSendToServer" },
+        { type: 9, value: config.proxy.port },
+        { type: 9, value: realToken },
+        { type: 9, value: realUser },
+        { type: 2, value: rewrittenAddr },
+      ], -1, 0);
+    } catch (e) {
+      // Failed to parse — pass through unmodified
+      return data;
+    }
   }
 
+  // ── Utility ────────────────────────────────────────────────────────
+
   /**
-   * Send a raw packet buffer to a client peer.
+   * Send a Growtopia-level packet to a client.
+   * NOTE: With raw UDP relay, we cannot inject ENet-framed packets
+   * because we don't track ENet protocol state (peer IDs, sequence
+   * numbers). This is a no-op for now; features that need injection
+   * (command feedback, status overlay) log to the proxy console instead.
    */
   sendToClient(clientId, data) {
-    const session = this.sessions.get(clientId);
-    if (!session || !session.clientPeer) return;
-    try {
-      const pkt = new enet.Packet(data, enet.PACKET_FLAG.RELIABLE);
-      session.clientPeer.send(0, pkt);
-    } catch (err) {
-      logger.debug(`[${clientId}] sendToClient failed: ${err.message}`);
-    }
+    // Cannot inject without ENet state tracking — log intent instead
+    logger.debug(`[${clientId}] sendToClient skipped (raw UDP mode, ${data.length} bytes)`);
   }
 
-  /**
-   * Show in-game proxy status to the player.
-   */
-  sendStatus(clientId) {
-    // Console message (chat box)
-    const consoleMsg = PacketHandler.buildConsoleMessage(
-      "`4[`#dqymon-proxy`4]`` `2Connected to proxy!``"
-    );
-    this.sendToClient(clientId, consoleMsg);
-
-    // Text overlay (big centered text, fades out)
-    const overlay = PacketHandler.buildTextOverlay(
-      "`4dqymon-proxy `2active``"
-    );
-    this.sendToClient(clientId, overlay);
-  }
-
-  cleanup(clientId) {
-    const session = this.sessions.get(clientId);
+  cleanup(clientKey) {
+    const session = this.sessions.get(clientKey);
     if (!session) return;
 
-    if (session.clientPeer) {
-      try { session.clientPeer.reset(); } catch (e) { /* already gone */ }
-    }
-    if (session.serverPeer) {
-      try { session.serverPeer.reset(); } catch (e) { /* already gone */ }
-    }
-    if (session.serverHost) {
-      try { session.serverHost.destroy(); } catch (e) { /* already gone */ }
-    }
+    try { session.serverSocket.close(); } catch (e) { /* already closed */ }
+    this.sessions.delete(clientKey);
+    this.commandHandler.clearUserState(session.clientId);
 
-    // Clean up maps
-    if (session.clientPeer) {
-      this.peerToClient.delete(session.clientPeer._pointer);
-    }
-    this.sessions.delete(clientId);
-    this.commandHandler.clearUserState(clientId);
-
-    logger.info(`[${clientId}] Session cleaned up`);
+    logger.info(`[${session.clientId}] Session cleaned up`);
   }
 
-  generateClientId() {
-    return crypto.randomBytes(6).toString("hex");
+  cleanupStaleSessions() {
+    const now = Date.now();
+    for (const [key, session] of this.sessions) {
+      if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
+        logger.info(`[${session.clientId}] Session timed out`);
+        this.cleanup(key);
+      }
+    }
   }
 
   getSession(clientId) {
-    return this.sessions.get(clientId);
+    for (const session of this.sessions.values()) {
+      if (session.clientId === clientId) return session;
+    }
+    return null;
   }
 }
 
@@ -449,7 +385,7 @@ process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(); });
 process.on("SIGTERM", () => { cleanup(); process.exit(); });
 
-// 1. Start the ENet proxy
+// 1. Start the raw UDP proxy
 proxy.start();
 
 // 2. Start the fake login server (serves server_data.php → proxy)
