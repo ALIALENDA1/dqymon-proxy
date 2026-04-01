@@ -47,6 +47,10 @@ class GrowtopiaProxy {
     this.commandHandler = new CommandHandler(this);
     this.proxyHost = null;
     this.loginServer = null;       // set after construction
+    // Queue of pending sub-server redirects (survives session cleanup).
+    // When a sub-server redirect is intercepted, the real target is pushed here.
+    // On the next client connection, it is consumed.
+    this.pendingServerQueue = [];
   }
 
   start() {
@@ -79,7 +83,7 @@ class GrowtopiaProxy {
           logger.info(`[CLIENT] New ENet connection: ${clientId}`);
 
           this.peerToClient.set(clientPeer._pointer, clientId);
-          this.sessions.set(clientId, { clientPeer, serverHost: null, serverPeer: null, pendingServer: null });
+          this.sessions.set(clientId, { clientPeer, serverHost: null, serverPeer: null });
 
           // Create a separate ENet client host to connect to the real GT server
           this.connectToServer(clientId);
@@ -132,10 +136,10 @@ class GrowtopiaProxy {
 
     // Use pending sub-server redirect, then login response, then static config.
     let serverHost, serverPort;
-    if (session.pendingServer) {
-      serverHost = session.pendingServer.host;
-      serverPort = session.pendingServer.port;
-      session.pendingServer = null; // consume it
+    if (this.pendingServerQueue.length > 0) {
+      const pending = this.pendingServerQueue.shift(); // consume oldest
+      serverHost = pending.host;
+      serverPort = pending.port;
     } else if (this.loginServer && this.loginServer.realServerHost) {
       serverHost = this.loginServer.realServerHost;
       serverPort = this.loginServer.realServerPort;
@@ -324,11 +328,8 @@ class GrowtopiaProxy {
 
                       if (realAddress) {
                         logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
-                        // Store per-session for the next connectToServer call
-                        const session = this.sessions.get(clientId);
-                        if (session) {
-                          session.pendingServer = { host: realAddress, port: realPort };
-                        }
+                        // Store at proxy level so it survives the session disconnect/reconnect cycle
+                        this.pendingServerQueue.push({ host: realAddress, port: realPort });
                       }
 
                       // Rewrite: redirect client to our proxy, but preserve token + user

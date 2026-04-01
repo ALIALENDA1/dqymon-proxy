@@ -1,5 +1,6 @@
 const config = require("../config/config");
 const Logger = require("../utils/Logger");
+const PacketHandler = require("./PacketHandler");
 
 class CommandHandler {
   constructor(proxy) {
@@ -56,13 +57,16 @@ class CommandHandler {
 
     this.logger.info(`[${clientId}] Dropping ${amount} DL`);
 
-    // TODO: Inject packet untuk memberikan DL
-    // Packet format Growtopia untuk item drop perlu di-reverse engineer
+    // Send feedback to player
+    const msg = PacketHandler.buildConsoleMessage(
+      "`4[`#dqymon-proxy`4]`` Drop DL not yet implemented (need packet research)"
+    );
+    this.proxy.sendToClient(clientId, msg);
 
     return {
       handled: true,
       command: "dropdl",
-      data: null, // akan dimodify server response
+      data: null,
     };
   }
 
@@ -79,8 +83,11 @@ class CommandHandler {
 
     this.logger.info(`[${clientId}] Warping to ${world}`);
 
-    // TODO: Inject warp packet
-    // Format: WRLD|worldname atau similar
+    // Send feedback to player
+    const msg = PacketHandler.buildConsoleMessage(
+      "`4[`#dqymon-proxy`4]`` Warp not yet implemented (need packet research)"
+    );
+    this.proxy.sendToClient(clientId, msg);
 
     return {
       handled: true,
@@ -104,8 +111,11 @@ class CommandHandler {
 
     this.logger.info(`[${clientId}] Giving item ${itemId} x${amount}`);
 
-    // TODO: Inject item packet
-    // Format: perlu research packet Growtopia
+    // Send feedback to player
+    const msg = PacketHandler.buildConsoleMessage(
+      "`4[`#dqymon-proxy`4]`` Item injection not yet implemented (need packet research)"
+    );
+    this.proxy.sendToClient(clientId, msg);
 
     return {
       handled: true,
@@ -129,7 +139,17 @@ Available Commands:
 
     this.logger.info(`[${clientId}] Help requested`);
 
-    // TODO: Send help to player's chat
+    // Send help text to player's chat
+    const msg = PacketHandler.buildConsoleMessage(
+      "`4[`#dqymon-proxy`4]`` Commands:\n" +
+      "`w/dropdl <amount>`` - Drop DL\n" +
+      "`w/warp <world>`` - Warp to world\n" +
+      "`w/outfit <itemid>`` - Give free outfit\n" +
+      "`w/item <itemid> [amount]`` - Give item\n" +
+      "`w/help`` - Show this message"
+    );
+    this.proxy.sendToClient(clientId, msg);
+
     return {
       handled: true,
       command: "help",
