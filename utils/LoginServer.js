@@ -137,12 +137,9 @@ class LoginServer {
 
             // Force type2|1 — tells GT to skip the web-based login
             // flow (loginurl) and connect directly via ENet.
-            // Without this, GT tries to reach loginurl which fails
-            // through the hosts redirect and causes a 404 error.
             if (/^type2\|/m.test(body)) {
               body = body.replace(/^type2\|.+$/m, "type2|1");
             } else {
-              // Insert before RTENDMARKERBS1001 or append
               if (body.includes("RTENDMARKERBS1001")) {
                 body = body.replace("RTENDMARKERBS1001", "type2|1\nRTENDMARKERBS1001");
               } else {
@@ -150,7 +147,20 @@ class LoginServer {
               }
             }
 
-            this.logger.info("[LOGIN] Modified server_data → proxy address (type2|1)");
+            // Strip error/maint/url lines — GT's real server often
+            // returns "error|1000|Update required" or "#maint|..."
+            // which forces a retry/update loop instead of connecting.
+            body = body.replace(/^error\|.+$/gm, "");
+            body = body.replace(/^url\|.+$/gm, "");
+            body = body.replace(/^#maint\|.+$/gm, "");
+            // Clean up blank lines left behind
+            body = body.replace(/\n{2,}/g, "\n").trim();
+            // Re-add trailing marker if stripped
+            if (!body.includes("RTENDMARKERBS1001")) {
+              body += "\nRTENDMARKERBS1001";
+            }
+
+            this.logger.info("[LOGIN] Modified server_data → proxy address (type2|1, stripped error/maint)");
             resolve(body);
           });
         });
