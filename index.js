@@ -45,6 +45,8 @@ class GrowtopiaProxy {
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
     this.proxyHost = null;
+    this.loginServer = null;       // set after construction
+    this.pendingServer = null;     // for sub-server redirects (OnSendToServer)
   }
 
   start() {
@@ -69,9 +71,6 @@ class GrowtopiaProxy {
 
         logger.info(
           `✓ ENet proxy started on ${config.proxy.host}:${config.proxy.port}`
-        );
-        logger.info(
-          `✓ Forwarding to ${config.serverConfig.host}:${config.serverConfig.port}`
         );
 
         // Incoming client connection
@@ -125,7 +124,23 @@ class GrowtopiaProxy {
     const session = this.sessions.get(clientId);
     if (!session) return;
 
-    const serverHost = enet.createClient(
+    // Use pending sub-server redirect, then login response, then static config.
+    let serverHost, serverPort;
+    if (this.pendingServer) {
+      serverHost = this.pendingServer.host;
+      serverPort = this.pendingServer.port;
+      this.pendingServer = null; // consume it
+    } else if (this.loginServer && this.loginServer.realServerHost) {
+      serverHost = this.loginServer.realServerHost;
+      serverPort = this.loginServer.realServerPort;
+    } else {
+      serverHost = config.serverConfig.host;
+      serverPort = config.serverConfig.port;
+    }
+
+    logger.info(`[${clientId}] Connecting to real GT server at ${serverHost}:${serverPort}`);
+
+    const serverHostEnet = enet.createClient(
       {
         peers: 1,
         channels: config.serverConfig.channels || 2,
@@ -144,8 +159,8 @@ class GrowtopiaProxy {
         session.serverHost = host;
 
         const serverAddr = new enet.Address({
-          address: config.serverConfig.host,
-          port: config.serverConfig.port,
+          address: serverHost,
+          port: serverPort,
         });
 
         const serverPeer = host.connect(
@@ -155,7 +170,7 @@ class GrowtopiaProxy {
           (err, peer) => {
             if (err) {
               logger.error(
-                `[${clientId}] Failed to connect to GT server: ${err.message || err}`
+                `[${clientId}] Failed to connect to GT server at ${serverHost}:${serverPort}: ${err.message || err}`
               );
               this.cleanup(clientId);
               return;
@@ -243,6 +258,110 @@ class GrowtopiaProxy {
   handleServerData(clientId, data) {
     let modifiedData = data;
 
+    // Intercept OnSendToServer variant (sub-server redirect)
+    // The real GT server sends this to tell client to disconnect
+    // and reconnect to a different server IP:port.
+    // We need to rewrite it so the client reconnects to our proxy,
+    // and we store the real target to connect on their behalf.
+    if (data.length > 60) {
+      try {
+        const msgType = data.readUInt32LE(0);
+        if (msgType === 4) { // TANK packet
+          const tankType = data.readUInt32LE(4);
+          if (tankType === 1) { // CALL_FUNCTION
+            const extraDataSize = data.readUInt32LE(56);
+            if (extraDataSize > 0 && data.length >= 60 + extraDataSize) {
+              const extraData = data.slice(60);
+              // Try to read variant function name
+              const varCount = extraData.readUInt8(0);
+              if (varCount > 0) {
+                // First variant: index(1) + type(1) + string
+                let offset = 1; // skip count byte
+                const idx0 = extraData.readUInt8(offset); offset += 1;
+                const type0 = extraData.readUInt8(offset); offset += 1;
+                if (type0 === 2 && offset + 4 <= extraData.length) { // string
+                  const strLen = extraData.readUInt32LE(offset); offset += 4;
+                  if (offset + strLen <= extraData.length) {
+                    const funcName = extraData.toString("utf8", offset, offset + strLen);
+                    offset += strLen;
+
+                    if (funcName === "OnSendToServer") {
+                      // Parse remaining variants to get port, token, user, address
+                      // variant[1] = int32 (port), variant[2] = int32 (token),
+                      // variant[3] = int32 (user), variant[4] = string (ip|doorId|uuid)
+                      logger.info(`[${clientId}] Intercepted OnSendToServer`);
+
+                      // Read variant[1] - port (int32, type 9)
+                      let realPort = 17091;
+                      if (offset + 2 <= extraData.length) {
+                        const idx1 = extraData.readUInt8(offset); offset += 1;
+                        const type1 = extraData.readUInt8(offset); offset += 1;
+                        if (type1 === 9 && offset + 4 <= extraData.length) {
+                          realPort = extraData.readInt32LE(offset);
+                        } else if (type1 === 5 && offset + 4 <= extraData.length) {
+                          realPort = extraData.readUInt32LE(offset);
+                        }
+                      }
+
+                      // We need to find the address string (variant[4])
+                      // For now, just log and rewrite the whole packet
+                      // The address is typically in variant[4] as "IP|doorId|uuid"
+                      // We'll rewrite the server+port in the response
+
+                      // Store pending address for ENet reconnection
+                      // Parse variant[4] for the real IP
+                      let realAddress = null;
+                      try {
+                        // Re-parse all variants to find variant[4]
+                        let off2 = 1; // skip count
+                        for (let vi = 0; vi < varCount && off2 < extraData.length; vi++) {
+                          const vIdx = extraData.readUInt8(off2); off2 += 1;
+                          const vType = extraData.readUInt8(off2); off2 += 1;
+                          if (vType === 1) { off2 += 4; } // float
+                          else if (vType === 2) { // string
+                            const sLen = extraData.readUInt32LE(off2); off2 += 4;
+                            if (vIdx === 4) {
+                              const addrStr = extraData.toString("utf8", off2, off2 + sLen);
+                              realAddress = addrStr.split("|")[0]; // "IP|doorId|uuid" → IP
+                            }
+                            off2 += sLen;
+                          }
+                          else if (vType === 3) { off2 += 8; } // vec2
+                          else if (vType === 4) { off2 += 12; } // vec3
+                          else if (vType === 5 || vType === 9) { off2 += 4; } // uint/int
+                        }
+                      } catch (e) { /* parsing error, skip */ }
+
+                      if (realAddress) {
+                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
+                        // Store for the next connectToServer call
+                        this.pendingServer = { host: realAddress, port: realPort };
+                      }
+
+                      // Rewrite the packet: change port to our proxy port
+                      // and address to 127.0.0.1
+                      const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
+                      modifiedData = PacketHandler.buildVariantPacket([
+                        { type: 2, value: "OnSendToServer" },
+                        { type: 9, value: config.proxy.port },     // port → proxy
+                        { type: 9, value: 0 },                      // token (will be sent fresh)
+                        { type: 9, value: 0 },                      // user
+                        { type: 2, value: `${proxyHost}|0|` },      // address → proxy
+                      ], -1, 0);
+
+                      return modifiedData;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Failed to parse — pass through unmodified
+      }
+    }
+
     if (config.cheats.freeOutfit) {
       modifiedData = this.packetHandler.injectItems(modifiedData, clientId);
     }
@@ -318,6 +437,9 @@ class GrowtopiaProxy {
 const proxy = new GrowtopiaProxy();
 const loginServer = new LoginServer();
 const gameLauncher = new GameLauncher();
+
+// The proxy needs access to the loginServer to read dynamic server address
+proxy.loginServer = loginServer;
 
 // Restore hosts file on any exit
 function cleanup() {

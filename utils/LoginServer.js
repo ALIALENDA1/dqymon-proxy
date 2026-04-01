@@ -61,6 +61,10 @@ class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.servers = [];
+    // The real GT server address/port extracted from the login response.
+    // index.js reads these to know where to connect via ENet.
+    this.realServerHost = null;
+    this.realServerPort = null;
     // Real Growtopia login endpoints — use IPs directly to bypass
     // the hosts file redirect (which points the domains to 127.0.0.1).
     // Each entry has the IP, the hostname (for TLS SNI + Host header),
@@ -125,6 +129,13 @@ class LoginServer {
               return;
             }
 
+            // Extract the REAL server IP and port before replacing
+            const serverMatch = body.match(/^server\|(.+)$/m);
+            const portMatch = body.match(/^port\|(.+)$/m);
+            if (serverMatch) this.realServerHost = serverMatch[1].trim();
+            if (portMatch) this.realServerPort = parseInt(portMatch[1].trim(), 10);
+            this.logger.info(`[LOGIN] Real GT server: ${this.realServerHost}:${this.realServerPort}`);
+
             // Replace server + port with proxy address
             body = body.replace(
               /^server\|.+$/m,
@@ -133,6 +144,13 @@ class LoginServer {
             body = body.replace(
               /^port\|.+$/m,
               `port|${config.proxy.port}`
+            );
+
+            // Rewrite loginurl to our proxy so the auth request
+            // doesn't try to verify our self-signed cert independently
+            body = body.replace(
+              /^loginurl\|.+$/m,
+              `loginurl|${proxyHost}`
             );
 
             // Force type2|1 — tells GT to skip the web-based login
@@ -203,11 +221,28 @@ class LoginServer {
   }
 
   /**
+   * Find the correct real endpoint IP for a given hostname.
+   */
+  resolveEndpoint(hostname) {
+    if (!hostname) return this.realLoginEndpoints[0];
+    const cleaned = hostname.split(":")[0].toLowerCase();
+    const match = this.realLoginEndpoints.find(
+      (ep) => ep.host.toLowerCase() === cleaned
+    );
+    return match || this.realLoginEndpoints[0];
+  }
+
+  /**
    * Proxy a non-server_data request to the real GT server,
    * forwarding the path, method, headers, and body as-is.
+   * Routes to the correct real IP based on the Host header.
    */
   proxyRawRequest(origReq, origRes, body) {
-    const ep = this.realLoginEndpoints[0]; // Use first endpoint
+    const incomingHost = (origReq.headers.host || "").split(":")[0];
+    const ep = this.resolveEndpoint(incomingHost);
+
+    this.logger.info(`[LOGIN] Proxying ${origReq.method} ${origReq.url} → ${ep.host} @ ${ep.ip}`);
+
     const reqOpts = {
       hostname: ep.ip,
       port: 443,
@@ -215,7 +250,7 @@ class LoginServer {
       method: origReq.method || "GET",
       headers: {
         ...origReq.headers,
-        host: origReq.headers.host || ep.host,
+        host: ep.host,
       },
       servername: ep.host,
       timeout: 8000,
@@ -269,10 +304,10 @@ class LoginServer {
         `body=${postBody.length}b`
       );
 
-      // Only handle /growtopia/server_data.php — the GT login endpoint
+      // Only modify /growtopia/server_data.php — everything else is
+      // transparently proxied to the real GT server at the correct IP.
       if (!req.url || !req.url.includes("/growtopia/server_data.php")) {
-        this.logger.warn(`[LOGIN] Unknown path: ${req.url} — proxying raw`);
-        // Proxy the request to the real GT server at the same path
+        this.logger.info(`[LOGIN] Transparent proxy: ${req.url}`);
         this.proxyRawRequest(req, res, postBody);
         return;
       }
