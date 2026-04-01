@@ -60,11 +60,17 @@ class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.servers = [];
-    // The real Growtopia login URLs to try (in order)
-    this.realLoginUrls = [
-      "https://www.growtopia1.com/growtopia/server_data.php",
-      "https://www.growtopia2.com/growtopia/server_data.php",
-      "https://login.growtopiagame.com/growtopia/server_data.php",
+    // Real Growtopia login endpoints — use IPs directly to bypass
+    // the hosts file redirect (which points the domains to 127.0.0.1).
+    // Each entry has the IP, the hostname (for TLS SNI + Host header),
+    // and the path.
+    this.realLoginEndpoints = [
+      { ip: "23.59.80.217",  host: "www.growtopia1.com" },
+      { ip: "23.59.80.203",  host: "www.growtopia1.com" },
+      { ip: "34.234.161.35", host: "www.growtopia2.com" },
+      { ip: "54.237.100.60", host: "www.growtopia2.com" },
+      { ip: "54.204.235.73", host: "login.growtopiagame.com" },
+      { ip: "98.90.113.253", host: "login.growtopiagame.com" },
     ];
   }
 
@@ -78,30 +84,30 @@ class LoginServer {
       const proxyHost =
         config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
 
-      const tryUrl = (index) => {
-        if (index >= this.realLoginUrls.length) {
-          // All URLs failed — return a basic fallback
+      const tryEndpoint = (index) => {
+        if (index >= this.realLoginEndpoints.length) {
           this.logger.warn("[LOGIN] All real GT servers unreachable, using fallback");
           resolve(this.getFallbackServerData());
           return;
         }
 
-        const url = this.realLoginUrls[index];
-        this.logger.info(`[LOGIN] Forwarding to real server: ${url}`);
+        const ep = this.realLoginEndpoints[index];
+        this.logger.info(`[LOGIN] Trying ${ep.host} @ ${ep.ip}`);
 
-        const urlObj = new URL(url);
         const reqOpts = {
-          hostname: urlObj.hostname,
+          hostname: ep.ip,           // Connect to IP directly (bypasses hosts file)
           port: 443,
-          path: urlObj.pathname,
+          path: "/growtopia/server_data.php",
           method: "POST",
           headers: {
+            "Host": ep.host,         // Real hostname in Host header
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "UbiServices_SDK_2019.Release.27_PC64_ansi_static",
             "Content-Length": Buffer.byteLength(postBody),
           },
-          timeout: 8000,
-          rejectAuthorized: false,
+          servername: ep.host,       // TLS SNI — required for cert validation
+          timeout: 5000,
+          rejectUnauthorized: true,
         };
 
         const req = https.request(reqOpts, (resp) => {
@@ -110,11 +116,11 @@ class LoginServer {
           resp.on("end", () => {
             let body = Buffer.concat(chunks).toString();
             this.logger.info(
-              `[LOGIN] Real server responded: ${resp.statusCode} (${body.length}b)`
+              `[LOGIN] ${ep.host} responded: ${resp.statusCode} (${body.length}b)`
             );
 
             if (resp.statusCode !== 200 || body.length < 20) {
-              tryUrl(index + 1);
+              tryEndpoint(index + 1);
               return;
             }
 
@@ -134,21 +140,21 @@ class LoginServer {
         });
 
         req.on("error", (err) => {
-          this.logger.warn(`[LOGIN] ${urlObj.hostname} failed: ${err.message}`);
-          tryUrl(index + 1);
+          this.logger.warn(`[LOGIN] ${ep.host}@${ep.ip} failed: ${err.message}`);
+          tryEndpoint(index + 1);
         });
 
         req.on("timeout", () => {
-          this.logger.warn(`[LOGIN] ${urlObj.hostname} timed out`);
+          this.logger.warn(`[LOGIN] ${ep.host}@${ep.ip} timed out`);
           req.destroy();
-          tryUrl(index + 1);
+          tryEndpoint(index + 1);
         });
 
         req.write(postBody);
         req.end();
       };
 
-      tryUrl(0);
+      tryEndpoint(0);
     });
   }
 
