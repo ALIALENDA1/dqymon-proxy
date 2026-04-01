@@ -28,6 +28,13 @@ module.exports = {
     freePlace: false,
   },
 
+  // Game Launcher
+  game: {
+    autoLaunch: true,        // Automatically open Growtopia on proxy start
+    path: null,              // Auto-detect, or set manually e.g. "C:\\Program Files\\Growtopia\\Growtopia.exe"
+    modifyHosts: true,       // Redirect Growtopia domains to proxy via hosts file
+  },
+
   // Logging
   logging: {
     enabled: true,

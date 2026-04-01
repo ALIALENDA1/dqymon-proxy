@@ -3,6 +3,8 @@ const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
 const CommandHandler = require("./handlers/CommandHandler");
 const Logger = require("./utils/Logger");
+const LoginServer = require("./utils/LoginServer");
+const GameLauncher = require("./utils/GameLauncher");
 
 const logger = new Logger();
 
@@ -250,4 +252,32 @@ class GrowtopiaProxy {
 
 // Start proxy
 const proxy = new GrowtopiaProxy();
+const loginServer = new LoginServer();
+const gameLauncher = new GameLauncher();
+
+// Restore hosts file on any exit
+function cleanup() {
+  gameLauncher.cleanup();
+  loginServer.stop();
+}
+process.on("exit", cleanup);
+process.on("SIGINT", () => { cleanup(); process.exit(); });
+process.on("SIGTERM", () => { cleanup(); process.exit(); });
+
+// 1. Start the ENet proxy
 proxy.start();
+
+// 2. Start the fake login server (serves server_data.php → proxy)
+loginServer.start();
+
+// 3. Redirect Growtopia domains to 127.0.0.1 & launch the game
+if (config.game && config.game.modifyHosts !== false) {
+  gameLauncher.modifyHosts();
+}
+
+if (config.game && config.game.autoLaunch !== false) {
+  // Small delay so the proxy & login server are ready
+  setTimeout(() => {
+    gameLauncher.launch();
+  }, 1500);
+}
