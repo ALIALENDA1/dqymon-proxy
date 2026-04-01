@@ -29,6 +29,7 @@ process.on("unhandledRejection", async (err) => {
 try {
 
 const enet = require("enet");
+const crypto = require("crypto");
 const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
 const CommandHandler = require("./handlers/CommandHandler");
@@ -322,7 +323,7 @@ class GrowtopiaProxy {
                       } catch (e) { /* parsing error, use defaults */ }
 
                       if (realAddress) {
-                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort} (token=${realToken}, user=${realUser})`);
+                        logger.info(`[${clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
                         // Store per-session for the next connectToServer call
                         const session = this.sessions.get(clientId);
                         if (session) {
@@ -421,7 +422,7 @@ class GrowtopiaProxy {
   }
 
   generateClientId() {
-    return Math.random().toString(36).substring(2, 11);
+    return crypto.randomBytes(6).toString("hex");
   }
 
   getSession(clientId) {

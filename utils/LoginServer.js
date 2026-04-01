@@ -62,11 +62,51 @@ l/ERC+VsRpSe1W0Wb2EXImGKeVu+bCKPESh1dG9jjSd5sF2HuJ0JH6WkNdP3CiCq
 Lqkk
 -----END CERTIFICATE-----`;
 
+// Allowed hostnames — only proxy requests for known GT domains
+const ALLOWED_HOSTS = new Set([
+  "www.growtopia1.com",
+  "www.growtopia2.com",
+  "login.growtopiagame.com",
+  "growtopia1.com",
+  "growtopia2.com",
+]);
+
+// Max POST body size (64 KB — GT login bodies are <1 KB)
+const MAX_BODY_SIZE = 64 * 1024;
+
+// Rate limiting: max requests per IP per window
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = 30;              // 30 requests/min
+
+/**
+ * Sanitize a URL for logging — strip tokens, keys, and long query strings.
+ */
+function sanitizeUrl(url) {
+  if (!url) return "(none)";
+  try {
+    const qIdx = url.indexOf("?");
+    if (qIdx === -1) return url;
+    const path = url.substring(0, qIdx);
+    const query = url.substring(qIdx + 1);
+    // Replace token/key values with [REDACTED]
+    const cleaned = query.replace(
+      /(token|valKey|key|session|auth)=[^&]*/gi,
+      "$1=[REDACTED]"
+    );
+    // Truncate if still very long
+    if (cleaned.length > 80) return path + "?" + cleaned.substring(0, 80) + "...";
+    return path + "?" + cleaned;
+  } catch {
+    return url.length > 120 ? url.substring(0, 120) + "..." : url;
+  }
+}
+
 class LoginServer {
   constructor() {
     this.logger = new Logger();
     this.servers = [];
     this.certInstalled = false;
+    this.rateLimitMap = new Map(); // ip -> { count, resetTime }
     // The real GT server address/port extracted from the login response.
     // index.js reads these to know where to connect via ENet.
     this.realServerHost = null;
@@ -83,6 +123,24 @@ class LoginServer {
       { ip: "54.204.235.73", host: "login.growtopiagame.com" },
       { ip: "98.90.113.253", host: "login.growtopiagame.com" },
     ];
+  }
+
+  /**
+   * Check rate limit for an IP. Returns true if allowed, false if blocked.
+   */
+  checkRateLimit(ip) {
+    const now = Date.now();
+    const entry = this.rateLimitMap.get(ip);
+    if (!entry || now > entry.resetTime) {
+      this.rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW_MS });
+      return true;
+    }
+    entry.count++;
+    if (entry.count > RATE_LIMIT_MAX) {
+      this.logger.warn(`[LOGIN] Rate limit exceeded for ${ip} (${entry.count} requests)`);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -255,7 +313,7 @@ class LoginServer {
     const incomingHost = (origReq.headers.host || "").split(":")[0];
     const ep = this.resolveEndpoint(incomingHost);
 
-    this.logger.info(`[LOGIN] Proxying ${origReq.method} ${origReq.url} → ${ep.host} @ ${ep.ip}`);
+    this.logger.info(`[LOGIN] Proxying ${origReq.method} ${sanitizeUrl(origReq.url)} → ${ep.host} @ ${ep.ip}`);
 
     const reqOpts = {
       hostname: ep.ip,
@@ -279,8 +337,12 @@ class LoginServer {
       resp.on("data", (c) => chunks.push(c));
       resp.on("end", () => {
         const respBody = Buffer.concat(chunks);
-        this.logger.info(`[LOGIN] Proxied ${origReq.url} → ${resp.statusCode} (${respBody.length}b)`);
-        origRes.writeHead(resp.statusCode, resp.headers);
+        this.logger.info(`[LOGIN] Proxied ${sanitizeUrl(origReq.url)} → ${resp.statusCode} (${respBody.length}b)`);
+        // Add security headers to prevent caching of auth responses
+        const headers = { ...resp.headers };
+        headers["cache-control"] = "no-store, no-cache, must-revalidate";
+        headers["pragma"] = "no-cache";
+        origRes.writeHead(resp.statusCode, headers);
         origRes.end(respBody);
       });
     });
@@ -292,7 +354,7 @@ class LoginServer {
     });
 
     proxyReq.on("timeout", () => {
-      this.logger.warn(`[LOGIN] Proxy raw timeout for ${origReq.url}`);
+      this.logger.warn(`[LOGIN] Proxy raw timeout for ${sanitizeUrl(origReq.url)}`);
       proxyReq.destroy();
       origRes.writeHead(504, { "Content-Type": "text/plain" });
       origRes.end("Timeout");
@@ -307,21 +369,56 @@ class LoginServer {
    * modifies the response, and sends it back to the game.
    */
   handleRequest(req, res, protocol) {
-    // Collect POST body (Growtopia sends POST with form data)
+    const clientIp = req.socket.remoteAddress || "unknown";
+
+    // ── Rate limiting ──────────────────────────────────────────────
+    if (!this.checkRateLimit(clientIp)) {
+      res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "60" });
+      res.end("Too many requests");
+      return;
+    }
+
+    // ── Host validation ── only proxy for known GT domains ────────
+    const reqHost = (req.headers.host || "").split(":")[0].toLowerCase();
+    if (reqHost && !ALLOWED_HOSTS.has(reqHost) && reqHost !== "127.0.0.1" && reqHost !== "localhost") {
+      this.logger.warn(`[LOGIN] Rejected request for unknown host: ${reqHost}`);
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+
+    // ── Collect POST body with size limit ──────────────────────────
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let bodySize = 0;
+    let aborted = false;
+
+    req.on("data", (chunk) => {
+      bodySize += chunk.length;
+      if (bodySize > MAX_BODY_SIZE) {
+        aborted = true;
+        this.logger.warn(`[LOGIN] Request body too large (${bodySize}b) from ${clientIp}`);
+        res.writeHead(413, { "Content-Type": "text/plain" });
+        res.end("Request too large");
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+
     req.on("end", () => {
+      if (aborted) return;
+
       const postBody = Buffer.concat(chunks).toString();
       this.logger.info(
-        `[LOGIN] ${protocol} ${req.method} ${req.url} ` +
-        `(${req.headers.host || "no-host"}) ` +
+        `[LOGIN] ${protocol} ${req.method} ${sanitizeUrl(req.url)} ` +
+        `(${reqHost || "no-host"}) ` +
         `body=${postBody.length}b`
       );
 
       // Only modify /growtopia/server_data.php — everything else is
       // transparently proxied to the real GT server at the correct IP.
       if (!req.url || !req.url.includes("/growtopia/server_data.php")) {
-        this.logger.info(`[LOGIN] Transparent proxy: ${req.url}`);
+        this.logger.info(`[LOGIN] Transparent proxy: ${sanitizeUrl(req.url)}`);
         this.proxyRawRequest(req, res, postBody);
         return;
       }
@@ -371,8 +468,8 @@ class LoginServer {
         this.logger.warn(`[LOGIN] TLS handshake error: ${err.message} from ${socket.remoteAddress || 'unknown'}`);
       });
 
-      httpsServer.listen(443, "0.0.0.0", () => {
-        this.logger.info("✓ Login server listening on HTTPS :443");
+      httpsServer.listen(443, "127.0.0.1", () => {
+        this.logger.info("✓ Login server listening on HTTPS 127.0.0.1:443");
       });
 
       httpsServer.on("error", (err) => {
@@ -388,8 +485,8 @@ class LoginServer {
     try {
       const httpServer = http.createServer(httpHandler);
 
-      httpServer.listen(80, "0.0.0.0", () => {
-        this.logger.info("✓ Login server listening on HTTP :80");
+      httpServer.listen(80, "127.0.0.1", () => {
+        this.logger.info("✓ Login server listening on HTTP 127.0.0.1:80");
       });
 
       httpServer.on("error", (err) => {
@@ -412,8 +509,8 @@ class LoginServer {
     try {
       const httpAlt = http.createServer(httpHandler);
 
-      httpAlt.listen(8080, "0.0.0.0", () => {
-        this.logger.info("✓ Login server listening on HTTP :8080 (alt)");
+      httpAlt.listen(8080, "127.0.0.1", () => {
+        this.logger.info("✓ Login server listening on HTTP 127.0.0.1:8080 (alt)");
       });
 
       httpAlt.on("error", (err) => {
