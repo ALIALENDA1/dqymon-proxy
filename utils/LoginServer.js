@@ -207,9 +207,14 @@ class LoginServer {
             // Extract the REAL server IP and port before replacing
             const serverMatch = body.match(/^server\|(.+)$/m);
             const portMatch = body.match(/^port\|(.+)$/m);
+            const loginUrlMatch = body.match(/^loginurl\|(.+)$/m);
             if (serverMatch) this.realServerHost = serverMatch[1].trim();
             if (portMatch) this.realServerPort = parseInt(portMatch[1].trim(), 10);
             this.logger.info(`[LOGIN] Real GT server: ${this.realServerHost}:${this.realServerPort}`);
+            if (loginUrlMatch) this.logger.info(`[LOGIN] loginurl: ${loginUrlMatch[1].trim()}`);
+
+            // Log the original response before modification
+            this.logger.info(`[LOGIN] Original server_data:\n${body}`);
 
             // Replace server + port with proxy address
             body = body.replace(
@@ -238,9 +243,10 @@ class LoginServer {
               }
             }
 
-            // Strip error/maint/url lines — GT's real server often
-            // returns "error|1000|Update required" or "#maint|..."
-            // which forces a retry/update loop instead of connecting.
+            // Strip error/maint/url lines — GT's real server sends these
+            // when it wants to force an update or maintenance screen.
+            // url| is NOT loginurl| (which we keep) — url| redirects to
+            // an update page that will return 404 through our proxy.
             body = body.replace(/^error\|.+$/gm, "");
             body = body.replace(/^url\|.+$/gm, "");
             body = body.replace(/^#maint\|.+$/gm, "");
@@ -252,6 +258,7 @@ class LoginServer {
             }
 
             this.logger.info("[LOGIN] Modified server_data → proxy address (type2|1, stripped error/maint)");
+            this.logger.info(`[LOGIN] server_data response body:\n${body}`);
             resolve(body);
           });
         });
@@ -338,6 +345,9 @@ class LoginServer {
       resp.on("end", () => {
         const respBody = Buffer.concat(chunks);
         this.logger.info(`[LOGIN] Proxied ${sanitizeUrl(origReq.url)} → ${resp.statusCode} (${respBody.length}b)`);
+        if (resp.statusCode >= 400) {
+          this.logger.warn(`[LOGIN] Non-OK response for ${sanitizeUrl(origReq.url)}: ${resp.statusCode} body=${respBody.toString().substring(0, 200)}`);
+        }
         // Add security headers to prevent caching of auth responses
         const headers = { ...resp.headers };
         headers["cache-control"] = "no-store, no-cache, must-revalidate";
@@ -417,7 +427,13 @@ class LoginServer {
 
       // Only modify /growtopia/server_data.php — everything else is
       // transparently proxied to the real GT server at the correct IP.
-      if (!req.url || !req.url.includes("/growtopia/server_data.php")) {
+      // Use flexible path matching in case GT changes the path slightly.
+      const isServerData = req.url && (
+        req.url.includes("/growtopia/server_data.php") ||
+        req.url.includes("server_data.php")
+      );
+
+      if (!isServerData) {
         this.logger.info(`[LOGIN] Transparent proxy: ${sanitizeUrl(req.url)}`);
         this.proxyRawRequest(req, res, postBody);
         return;

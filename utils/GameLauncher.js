@@ -148,17 +148,27 @@ class GameLauncher {
         // Rule may already exist — that's fine
       }
     }
-    // UDP rule for ENet proxy port (ENet uses UDP, not TCP)
+    // UDP inbound rule for ENet proxy port
     try {
       execSync(
-        `netsh advfirewall firewall add rule name="dqymon-proxy-udp-17091" ` +
+        `netsh advfirewall firewall add rule name="dqymon-proxy-udp-${config.proxy.port}" ` +
         `dir=in action=allow protocol=UDP localport=${config.proxy.port} >nul 2>&1`,
         { stdio: "pipe" }
       );
     } catch {
       // Rule may already exist
     }
-    this.logger.info(`✓ Firewall rules added (TCP: 80,443,8080 | UDP: ${config.proxy.port})`);
+    // UDP outbound rule — raw UDP relay uses ephemeral ports to reach GT servers
+    try {
+      execSync(
+        `netsh advfirewall firewall add rule name="dqymon-proxy-udp-out" ` +
+        `dir=out action=allow protocol=UDP program="${process.execPath}" >nul 2>&1`,
+        { stdio: "pipe" }
+      );
+    } catch {
+      // Rule may already exist
+    }
+    this.logger.info(`✓ Firewall rules added (TCP in: 80,443,8080 | UDP in: ${config.proxy.port} | UDP out: allow)`);
   }
 
   /**
