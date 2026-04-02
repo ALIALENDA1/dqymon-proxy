@@ -145,10 +145,12 @@ class GameLauncher {
       "dqymon-proxy-tcp-443",
       "dqymon-proxy-tcp-8080",
       "dqymon-proxy-udp-17091",
+      "dqymon-proxy-udp-17092",
       "dqymon-proxy-udp-out",
       "dqymon-proxy-udp-all-in",
       "dqymon-proxy-udp-all-out",
       `dqymon-proxy-udp-${config.proxy.port}`,
+      `dqymon-proxy-udp-${config.proxy.port + 1}`,
     ];
     for (const name of oldRuleNames) {
       try {
@@ -173,9 +175,8 @@ class GameLauncher {
     }
 
     // UDP: Program-level blanket rules for ALL ports, BOTH directions.
-    // The single proxy socket on port 17091 sends outbound UDP to GT
-    // servers and receives responses. These rules ensure Windows
-    // Firewall doesn't block any of that traffic.
+    // Server socket uses an ephemeral OS-assigned port (like a real client).
+    // Program-level rules cover all ports regardless.
     const exe = process.execPath;
     try {
       execSync(
@@ -192,7 +193,7 @@ class GameLauncher {
       );
     } catch {}
 
-    // Port-specific UDP rule as additional fallback
+    // Port-specific rule for the client-facing port
     try {
       execSync(
         `netsh advfirewall firewall add rule name="dqymon-proxy-udp-${config.proxy.port}" ` +
