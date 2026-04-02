@@ -136,7 +136,32 @@ class GameLauncher {
    */
   addFirewallRules() {
     if (process.platform !== "win32") return;
-    // TCP rules for HTTP/HTTPS login server ports
+
+    // ── Step 1: Delete ALL old proxy firewall rules ────────────────
+    // Old builds may have left rules pointing to different exe paths
+    // or with conflicting port-specific restrictions. Clean slate.
+    const oldRuleNames = [
+      "dqymon-proxy-tcp-80",
+      "dqymon-proxy-tcp-443",
+      "dqymon-proxy-tcp-8080",
+      "dqymon-proxy-udp-17091",
+      "dqymon-proxy-udp-out",
+      "dqymon-proxy-udp-all-in",
+      "dqymon-proxy-udp-all-out",
+      `dqymon-proxy-udp-${config.proxy.port}`,
+    ];
+    for (const name of oldRuleNames) {
+      try {
+        execSync(
+          `netsh advfirewall firewall delete rule name="${name}" >nul 2>&1`,
+          { stdio: "pipe" }
+        );
+      } catch {}
+    }
+    this.logger.info("✓ Cleared old firewall rules");
+
+    // ── Step 2: Add fresh rules ────────────────────────────────────
+    // TCP rules for login server HTTPS interception
     for (const port of [80, 443, 8080]) {
       try {
         execSync(
@@ -144,13 +169,13 @@ class GameLauncher {
           `dir=in action=allow protocol=TCP localport=${port} >nul 2>&1`,
           { stdio: "pipe" }
         );
-      } catch {
-        // Rule may already exist — that's fine
-      }
+      } catch {}
     }
-    // Program-level blanket UDP rules — allows ALL inbound+outbound UDP
-    // for this executable on ALL ports. Per-session sockets bind to
-    // ephemeral ports that would otherwise be blocked by Windows Firewall.
+
+    // UDP: Program-level blanket rules for ALL ports, BOTH directions.
+    // The single proxy socket on port 17091 sends outbound UDP to GT
+    // servers and receives responses. These rules ensure Windows
+    // Firewall doesn't block any of that traffic.
     const exe = process.execPath;
     try {
       execSync(
@@ -166,7 +191,8 @@ class GameLauncher {
         { stdio: "pipe" }
       );
     } catch {}
-    // Also keep port-specific rule as fallback for the main proxy port
+
+    // Port-specific UDP rule as additional fallback
     try {
       execSync(
         `netsh advfirewall firewall add rule name="dqymon-proxy-udp-${config.proxy.port}" ` +
@@ -174,7 +200,9 @@ class GameLauncher {
         { stdio: "pipe" }
       );
     } catch {}
-    this.logger.info(`✓ Firewall rules added (TCP in: 80,443,8080 | UDP: program-level allow-all + port ${config.proxy.port})`);
+
+    this.logger.info(`✓ Firewall rules added (TCP: 80,443,8080 | UDP: program-level + port ${config.proxy.port})`);
+    this.logger.info(`  Program path: ${exe}`);
   }
 
   /**
