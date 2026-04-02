@@ -311,16 +311,13 @@ class GrowtopiaProxy {
           `[${clientId}] ✗ Sent ${session.clientPackets} packets, received 0 back`
         );
         if (this.loginServer && this.loginServer.maintenanceDetected) {
-          logger.error(
-            `[${clientId}] ✗ server_data had #maint — the server is LIKELY genuinely in maintenance`
-          );
-          logger.error(
-            `[${clientId}] ✗ Try again later when maintenance is over, or test WITHOUT the proxy`
-          );
-          logger.error(
-            `[${clientId}] ✗ at the SAME TIME to confirm the server accepts ENet connections right now`
+          logger.warn(
+            `[${clientId}] Note: server_data had #maint flag (may not prevent connections)`
           );
         }
+        logger.error(
+          `[${clientId}] ✗ Run dqymon-diagnose.exe relay test to check if your machine can relay UDP`
+        );
         gameLog.logConnectionFail(
           clientId,
           `${serverHost}:${serverPort}`,
@@ -382,13 +379,11 @@ class GrowtopiaProxy {
     // Wait 10 seconds for response
     setTimeout(() => {
       if (!responded) {
-        logger.warn(`[MIRROR] ✗ No response from GT server after 10s`);
-        logger.warn(`[MIRROR] ✗ This means the GT server is NOT accepting ENet connections`);
-        logger.warn(`[MIRROR] ✗ from this machine right now (likely maintenance mode)`);
-        logger.warn(`[MIRROR] ✗ The proxy is working correctly — the server is the issue.`);
-        logger.warn(`[MIRROR] ✗ To confirm: close this proxy, try connecting WITHOUT it.`);
-        logger.warn(`[MIRROR] ✗ If direct connection ALSO fails → server is in maintenance.`);
-        gameLog.logEvent("MIRROR TEST: No response — server appears DOWN or blocking ENet.");
+        logger.warn(`[MIRROR] ✗ No response from mirror test after 10s`);
+        logger.warn(`[MIRROR] ✗ Our crafted packet may not match GT's custom ENet format.`);
+        logger.warn(`[MIRROR] ✗ This does NOT prove the server is down.`);
+        logger.warn(`[MIRROR] ✗ Run dqymon-diagnose.exe relay test for a definitive answer.`);
+        gameLog.logEvent("MIRROR TEST: No response (crafted packet may not match GT format).");
       }
       try { testSocket.close(); } catch {}
     }, 10000);
