@@ -211,16 +211,29 @@ class GrowtopiaProxy {
     session.serverPackets = (session.serverPackets || 0) + 1;
     this.totalServerPackets++;
 
-    // First server response = connection established!
+    // First server response = ENet handshake progressing
     if (session.serverPackets === 1) {
-      logger.info(`[${session.clientId}] ✓ GT server responded! Connection established.`);
-      logger.info(
-        `[${session.clientId}] Response from ${rinfo.address}:${rinfo.port} (${msg.length}b)`
-      );
+      logger.info(`[${session.clientId}] ✓ GT server responded! ENet handshake in progress...`);
       gameLog.logConnectionSuccess(
         session.clientId,
         `${session.serverHost}:${session.serverPort}`
       );
+    }
+
+    // Detect handshake completion: once we see data packets (not CONNECT/VERIFY_CONNECT)
+    if (!session.handshakeComplete) {
+      const parsed = ENetParser.parseDatagram(msg);
+      if (parsed) {
+        const hasDataCmd = parsed.commands.some(c =>
+          c.cmdType === ENetParser.CMD.SEND_RELIABLE ||
+          c.cmdType === ENetParser.CMD.SEND_UNRELIABLE
+        );
+        if (hasDataCmd) {
+          session.handshakeComplete = true;
+          logger.info(`[${session.clientId}] ✓ ENet handshake complete — game data flowing!`);
+          logger.info(`[${session.clientId}] ✓ MAC spoofing and game event logging active`);
+        }
+      }
     }
 
     // Log first few packets and then periodically
@@ -279,6 +292,8 @@ class GrowtopiaProxy {
       lastActivity: Date.now(),
       clientPackets: 0,
       serverPackets: 0,
+      handshakeComplete: false,   // true after first data packet (not CONNECT/VERIFY_CONNECT)
+      loginReceived: false,       // true after client sends GT type-2 login
     };
 
     this.sessions.set(clientKey, session);
@@ -295,14 +310,20 @@ class GrowtopiaProxy {
       if (!this.sessions.has(clientKey)) return; // session already cleaned up
       if (!session.serverPackets) {
         logger.error(
-          `[${clientId}] ✗ GT server ${serverHost}:${serverPort} did NOT respond after 15s`
+          `[${clientId}] ✗ ENet handshake FAILED — GT server ${serverHost}:${serverPort} did not respond`
         );
         logger.error(
-          `[${clientId}] ✗ Sent ${session.clientPackets} packets, received 0 back`
+          `[${clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
         );
         if (this.loginServer && this.loginServer.maintenanceDetected) {
           logger.warn(
-            `[${clientId}] Note: server_data had #maint flag (may not prevent connections)`
+            `[${clientId}] The server_data had #maint flag — server is likely in maintenance`
+          );
+          logger.warn(
+            `[${clientId}] MAC spoofing + game event logs only work AFTER handshake succeeds`
+          );
+          logger.warn(
+            `[${clientId}] Wait for maintenance to end, then restart the proxy`
           );
         }
         logger.error(
@@ -664,6 +685,10 @@ class GrowtopiaProxy {
 
     // Type 2 = login info — spoof device fingerprints
     if (msgType === 2) {
+      if (!session.loginReceived) {
+        session.loginReceived = true;
+        logger.info(`[${session.clientId}] ✓ Login packet received — processing MAC spoof...`);
+      }
       return this.spoofLoginInfo(session, data);
     }
 

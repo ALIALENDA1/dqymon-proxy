@@ -101,35 +101,108 @@ function tryParseCommands(buf, startOffset) {
 
 /**
  * Parse an ENet UDP datagram into header info and commands.
+ *
+ * Growtopia uses a MODIFIED ENet that always includes the 2-byte sentTime
+ * field but does NOT set the sentTime flag (bit 15) in the peerID word.
+ * We try multiple header layouts and pick the best one (most valid commands
+ * parsed, with CRC32 match preferred).
+ *
  * Returns { headerSize, hasChecksum, hasSentTime, commands[] } or null.
  */
 function parseDatagram(buf) {
   if (buf.length < 6) return null;
 
   const peerIDField = buf.readUInt16BE(0);
-  const hasSentTime = !!(peerIDField & 0x8000);
+  const flagSentTime = !!(peerIDField & 0x8000);
   const isCompressed = !!(peerIDField & 0x4000);
 
   // Cannot parse compressed datagrams — relay them as-is
   if (isCompressed) return null;
 
-  const baseOffset = 2 + (hasSentTime ? 2 : 0);
+  // Build candidate layouts to try.
+  // GT always includes sentTime (2 bytes at offset 2) but does NOT set the flag.
+  // We try all combinations and score them by quality.
+  const candidates = [];
 
-  // Try without checksum first
-  let commands = tryParseCommands(buf, baseOffset);
-  if (commands) {
-    return { headerSize: baseOffset, hasChecksum: false, hasSentTime, commands };
-  }
+  const offsets = flagSentTime
+    ? [4]          // Flag says sentTime → header = 4 bytes
+    : [2, 4];      // Flag says no sentTime → try both (GT lies about this)
 
-  // Try with 4-byte checksum
-  if (baseOffset + 4 < buf.length) {
-    commands = tryParseCommands(buf, baseOffset + 4);
-    if (commands) {
-      return { headerSize: baseOffset + 4, hasChecksum: true, hasSentTime, commands };
+  for (const base of offsets) {
+    const actualSentTime = base === 4;
+
+    // Without checksum
+    let cmds = tryParseCommands(buf, base);
+    if (cmds) {
+      candidates.push({
+        headerSize: base, hasChecksum: false,
+        hasSentTime: actualSentTime, commands: cmds,
+        score: scoreCandidate(cmds, buf, -1, 0),
+      });
+    }
+
+    // With 4-byte checksum after the base header
+    if (base + 4 < buf.length) {
+      cmds = tryParseCommands(buf, base + 4);
+      if (cmds) {
+        const crcOk = verifyCRC32(buf, base);
+        candidates.push({
+          headerSize: base + 4, hasChecksum: true,
+          hasSentTime: actualSentTime, commands: cmds,
+          score: scoreCandidate(cmds, buf, base, crcOk ? 10 : 0),
+        });
+      }
     }
   }
 
-  return null;
+  if (candidates.length === 0) return null;
+
+  // Pick the best candidate (highest score)
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0];
+}
+
+/**
+ * Score a parsing candidate. Higher = more likely correct.
+ *  - CRC32 match bonus: +20
+ *  - CONNECT/VERIFY_CONNECT perfectly fills buffer: +15
+ *  - Commands consume entire buffer exactly: +5
+ *  - Data-carrying commands with plausible GT payload type (1-10): +8
+ *  - Each valid command type: +1
+ */
+function scoreCandidate(commands, buf, crcOffset, bonus) {
+  let score = bonus;
+  for (const cmd of commands) {
+    score += 1; // valid command
+
+    // CONNECT or VERIFY_CONNECT that perfectly fills remaining buffer
+    if ((cmd.cmdType === CMD.CONNECT || cmd.cmdType === CMD.VERIFY_CONNECT) &&
+        cmd.offset + cmd.fixedTotal + cmd.dataLen === buf.length) {
+      score += 15;
+    }
+
+    // Check if data-carrying command has a valid GT message type (1-10)
+    if (cmd.dataLen >= 4) {
+      const gtType = buf.readUInt32LE(cmd.dataStart);
+      if (gtType >= 1 && gtType <= 10) score += 8;
+    }
+  }
+  // Check if commands consume the entire remaining buffer
+  const lastCmd = commands[commands.length - 1];
+  const endOffset = lastCmd.dataStart + lastCmd.dataLen;
+  if (endOffset === buf.length) score += 5;
+  return score;
+}
+
+/**
+ * Verify CRC32 checksum at the given offset.
+ */
+function verifyCRC32(buf, checksumOffset) {
+  if (checksumOffset + 4 > buf.length) return false;
+  const stored = buf.readUInt32LE(checksumOffset);
+  const testBuf = Buffer.from(buf);
+  testBuf.writeUInt32LE(0, checksumOffset);
+  return crc32(testBuf) === stored;
 }
 
 /**
