@@ -28,6 +28,17 @@ module.exports = {
     freePlace: false,
   },
 
+  // Device Spoofing — modify device fingerprints in login packets
+  spoof: {
+    enabled: true,
+    mac: "random",        // "random" = new each session, or set "02:xx:xx:xx:xx:xx"
+    rid: "random",        // "random" = new each session, or set hex string
+    hash: "random",       // "random" = new each session
+    hash2: "random",
+    fhash: "random",
+    zf: "random",
+  },
+
   // Game Launcher
   game: {
     autoLaunch: true,        // Automatically open Growtopia on proxy start

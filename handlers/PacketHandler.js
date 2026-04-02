@@ -306,6 +306,74 @@ class PacketHandler {
     // TODO: Implement DL bypass
     return packet;
   }
+
+  // ── Variant list parser (for reading server→client variant calls) ──
+
+  /**
+   * Parse a serialized variant list from TANK extra data.
+   * Returns array of { index, type, value }.
+   *   type 1 = float, type 2 = string, type 3 = vec2,
+   *   type 4 = vec3, type 5 = uint32, type 9 = int32
+   */
+  static parseVariantList(extraData) {
+    if (!extraData || extraData.length < 1) return [];
+    const count = extraData.readUInt8(0);
+    const variants = [];
+    let offset = 1;
+
+    for (let i = 0; i < count && offset < extraData.length; i++) {
+      if (offset + 2 > extraData.length) break;
+      const index = extraData.readUInt8(offset); offset++;
+      const type = extraData.readUInt8(offset); offset++;
+
+      let value;
+      try {
+        switch (type) {
+          case 1: // float
+            if (offset + 4 > extraData.length) return variants;
+            value = extraData.readFloatLE(offset); offset += 4;
+            break;
+          case 2: { // string
+            if (offset + 4 > extraData.length) return variants;
+            const len = extraData.readUInt32LE(offset); offset += 4;
+            if (offset + len > extraData.length) return variants;
+            value = extraData.toString("utf8", offset, offset + len); offset += len;
+            break;
+          }
+          case 3: // vec2
+            if (offset + 8 > extraData.length) return variants;
+            value = [extraData.readFloatLE(offset), extraData.readFloatLE(offset + 4)];
+            offset += 8;
+            break;
+          case 4: // vec3
+            if (offset + 12 > extraData.length) return variants;
+            value = [
+              extraData.readFloatLE(offset),
+              extraData.readFloatLE(offset + 4),
+              extraData.readFloatLE(offset + 8),
+            ];
+            offset += 12;
+            break;
+          case 5: // uint32
+            if (offset + 4 > extraData.length) return variants;
+            value = extraData.readUInt32LE(offset); offset += 4;
+            break;
+          case 9: // int32
+            if (offset + 4 > extraData.length) return variants;
+            value = extraData.readInt32LE(offset); offset += 4;
+            break;
+          default:
+            return variants; // unknown type — stop
+        }
+      } catch {
+        return variants;
+      }
+
+      variants.push({ index, type, value });
+    }
+
+    return variants;
+  }
 }
 
 PacketHandler.MSG_TYPE = MSG_TYPE;

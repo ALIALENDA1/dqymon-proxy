@@ -38,6 +38,7 @@ const LoginServer = require("./utils/LoginServer");
 const GameLauncher = require("./utils/GameLauncher");
 const ENetParser = require("./utils/ENetParser");
 const GameLog = require("./utils/GameLog");
+const GameEventLogger = require("./utils/GameEventLogger");
 
 const logger = new Logger();
 const gameLog = new GameLog();
@@ -51,81 +52,56 @@ class GrowtopiaProxy {
     this.sessions = new Map();
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
+    this.gameEventLogger = new GameEventLogger();
     this.clientSocket = null;      // Receives from Growtopia client (port 17091)
-    this.serverSocket = null;      // Sends to / receives from GT servers (ephemeral port)
     this.loginServer = null;       // set after construction
     // Queue of pending sub-server redirects (survives session teardown).
     this.pendingServerQueue = [];
     // Global packet counters
     this.totalClientPackets = 0;
     this.totalServerPackets = 0;
+    // Device spoofing state (generated once per proxy session)
+    this.spoofState = this.generateSpoofState();
   }
 
   start() {
-    // ── Socket 1: Client-facing (port 17091) ──
-    // Growtopia connects here (127.0.0.1:17091).
+    // ── Single UDP socket (port 17091) ──
+    // Handles BOTH client and server traffic on the same port.
+    // Client sends here (127.0.0.1:17091), and we also send to the
+    // GT server FROM this port. This avoids firewall/NAT issues with
+    // ephemeral ports — responses come back to the same port.
     this.clientSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
 
     this.clientSocket.on("message", (msg, rinfo) => {
-      const clientKey = `${rinfo.address}:${rinfo.port}`;
+      // Route: check if this is a GT server response first
+      const serverSession = this.findSessionForServerResponse(rinfo);
+      if (serverSession) {
+        this.handleServerMessage(serverSession, msg, rinfo);
+        return;
+      }
 
+      // Otherwise it's from a GT client
+      const clientKey = `${rinfo.address}:${rinfo.port}`;
       if (!this.sessions.has(clientKey)) {
         this.createSession(clientKey, rinfo);
       }
-
       this.handleClientPacket(this.sessions.get(clientKey), msg, rinfo);
     });
 
     this.clientSocket.on("error", (err) => {
-      logger.error(`Client socket error: ${err.message}`);
+      logger.error(`Socket error: ${err.message}`);
     });
 
     this.clientSocket.on("close", () => {
-      logger.warn("Client socket closed unexpectedly");
+      logger.warn("Socket closed unexpectedly");
     });
 
     this.clientSocket.bind(config.proxy.port, config.proxy.host, () => {
       logger.info(
-        `✓ Client socket on ${config.proxy.host}:${config.proxy.port} (game connects here)`
+        `✓ Listening on ${config.proxy.host}:${config.proxy.port} (single socket mode)`
       );
-    });
-
-    // ── Socket 2: Server-facing (ephemeral port) ──
-    // Sends to GT servers from a random OS-assigned port, just like
-    // a real Growtopia client would. Receives GT server responses.
-    this.serverSocket = dgram.createSocket("udp4");
-
-    this.serverSocket.on("message", (msg, rinfo) => {
-      const session = this.findSessionForServerResponse(rinfo);
-      if (session) {
-        this.handleServerMessage(session, msg, rinfo);
-      } else {
-        logger.warn(
-          `[PROXY] Unmatched server response from ${rinfo.address}:${rinfo.port} (${msg.length}b)`
-        );
-        for (const s of this.sessions.values()) {
-          logger.warn(`[PROXY]   session ${s.clientId}: expects ${s.serverHost}:${s.serverPort}`);
-        }
-      }
-    });
-
-    this.serverSocket.on("error", (err) => {
-      logger.error(`Server socket error: ${err.message}`);
-    });
-
-    this.serverSocket.on("close", () => {
-      logger.warn("Server socket closed — attempting to recreate");
-      try {
-        this.serverSocket = dgram.createSocket("udp4");
-        this.serverSocket.on("message", (msg, rinfo) => {
-          const session = this.findSessionForServerResponse(rinfo);
-          if (session) this.handleServerMessage(session, msg, rinfo);
-        });
-        this.serverSocket.on("error", (err) => {
-          logger.error(`Recreated server socket error: ${err.message}`);
-        });
-      } catch (e) {
-        logger.error(`Failed to recreate server socket: ${e.message}`);
+      if (this.spoofState.enabled) {
+        logger.info(`✓ Spoofing: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
       }
     });
 
@@ -192,52 +168,25 @@ class GrowtopiaProxy {
       this.mirrorTest(session, msg);
     }
 
-    // Inspect Growtopia payloads inside the ENet datagram
+    // Inspect and possibly modify Growtopia payloads (MAC spoofing, etc.)
     const modified = this.inspectClientDatagram(session, msg);
 
-    // Forward to GT server from our server socket (ephemeral port).
-    this.serverSocket.send(
+    // Forward to GT server from the SAME socket (port 17091).
+    // Single-socket avoids firewall/NAT blocking on ephemeral ports.
+    this.clientSocket.send(
       modified, 0, modified.length,
       session.serverPort, session.serverHost,
       (err) => {
         if (err) {
           logger.error(`[${session.clientId}] Send to GT server failed: ${err.message}`);
         } else if (session.clientPackets <= 3) {
-          try {
-            const addr = this.serverSocket.address();
-            logger.info(
-              `[${session.clientId}] ✓ Sent ${modified.length}b to ` +
-              `${session.serverHost}:${session.serverPort} from :${addr.port}`
-            );
-          } catch (e) {
-            logger.info(`[${session.clientId}] ✓ Sent ${modified.length}b to ${session.serverHost}:${session.serverPort}`);
-          }
+          logger.info(
+            `[${session.clientId}] ✓ Sent ${modified.length}b to ` +
+            `${session.serverHost}:${session.serverPort} from :${config.proxy.port}`
+          );
         }
       }
     );
-
-    // Fallback: after 5 seconds with no response, also try sending
-    // from the clientSocket (port 17091) in case the ephemeral port
-    // is being blocked
-    if (session.clientPackets === 1) {
-      session.fallbackTimer = setTimeout(() => {
-        if (!this.sessions.has(`${rinfo.address}:${rinfo.port}`)) return;
-        if (session.serverPackets === 0) {
-          logger.warn(`[${session.clientId}] No response yet — trying fallback: send from clientSocket (port ${config.proxy.port})`);
-          this.clientSocket.send(
-            msg, 0, msg.length,
-            session.serverPort, session.serverHost,
-            (err) => {
-              if (err) {
-                logger.error(`[${session.clientId}] Fallback send failed: ${err.message}`);
-              } else {
-                logger.info(`[${session.clientId}] Fallback: sent ${msg.length}b from port ${config.proxy.port}`);
-              }
-            }
-          );
-        }
-      }, 5000);
-    }
   }
 
   /**
@@ -247,12 +196,6 @@ class GrowtopiaProxy {
     session.lastActivity = Date.now();
     session.serverPackets = (session.serverPackets || 0) + 1;
     this.totalServerPackets++;
-
-    // Cancel the fallback timer on first server response
-    if (session.serverPackets === 1 && session.fallbackTimer) {
-      clearTimeout(session.fallbackTimer);
-      session.fallbackTimer = null;
-    }
 
     // First server response = connection established!
     if (session.serverPackets === 1) {
@@ -595,19 +538,22 @@ class GrowtopiaProxy {
 
   /**
    * Inspect a client-to-server datagram for Growtopia commands.
+   * May MODIFY the datagram (e.g. MAC spoofing on login packets).
    * Returns the (possibly modified) datagram buffer.
    */
   inspectClientDatagram(session, buf) {
     try {
       const payloads = ENetParser.extractPayloads(buf);
       for (const { cmd, data } of payloads) {
-        this.handleClientPayload(session, data);
+        const modified = this.handleClientPayload(session, data);
+        if (modified && modified !== data) {
+          // Replace this payload in the ENet datagram
+          return ENetParser.replacePayload(buf, cmd, modified);
+        }
       }
     } catch (e) {
       // Parsing failed — just relay unmodified
     }
-    // Always forward the original datagram (commands are logged but not stripped,
-    // to avoid breaking ENet reliable sequence flow).
     return buf;
   }
 
@@ -635,17 +581,27 @@ class GrowtopiaProxy {
 
   /**
    * Inspect a Growtopia payload from client→server traffic.
-   * Detects and logs commands.
+   * Handles: login spoofing (type 2), command detection (type 3),
+   * action logging (type 3), and TANK events (type 4).
+   * Returns modified payload Buffer if changed, or original.
    */
   handleClientPayload(session, data) {
-    if (data.length < 4) return;
+    if (data.length < 4) return data;
 
     const msgType = data.readUInt32LE(0);
 
-    // Only look at text packets (type 2 = login info, type 3 = action/text)
-    if (msgType === 2 || msgType === 3) {
-      const text = data.toString("utf8", 4, Math.min(data.length, 260));
+    // Type 2 = login info — spoof device fingerprints
+    if (msgType === 2) {
+      return this.spoofLoginInfo(session, data);
+    }
+
+    // Type 3 = action/text — log actions and check commands
+    if (msgType === 3) {
+      const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
       const prefix = config.commands.prefix;
+
+      // Log the client action (world join, drop, chat, etc.)
+      this.gameEventLogger.processClientAction(text);
 
       if (text.startsWith(prefix) || text.includes(`|text|${prefix}`)) {
         const result = this.commandHandler.execute(session.clientId, text);
@@ -654,105 +610,172 @@ class GrowtopiaProxy {
         }
       }
     }
+
+    // Type 4 = TANK — log tile/item events
+    if (msgType === 4 && data.length >= 60) {
+      const tankType = data.readUInt32LE(4);
+      this.gameEventLogger.processTankPacket(tankType, data.slice(4));
+    }
+
+    return data;
   }
 
   /**
    * Inspect a Growtopia payload from server→client traffic.
-   * Intercepts OnSendToServer (sub-server redirects) and rewrites
-   * the target address to point back to our proxy.
+   * Parses ALL variant calls for game event logging, and
+   * intercepts OnSendToServer for sub-server redirect rewriting.
    * Returns modified payload Buffer, or the original if unchanged.
    */
   handleServerPayload(session, data) {
-    if (data.length <= 60) return data;
+    if (data.length < 4) return data;
 
-    try {
-      const msgType = data.readUInt32LE(0);
-      if (msgType !== 4) return data; // Not a TANK packet
+    const msgType = data.readUInt32LE(0);
 
-      const tankType = data.readUInt32LE(4);
-      if (tankType !== 1) return data; // Not CALL_FUNCTION
-
-      const extraDataSize = data.readUInt32LE(56);
-      if (extraDataSize === 0 || data.length < 60 + extraDataSize) return data;
-
-      const extraData = data.slice(60);
-      const varCount = extraData.readUInt8(0);
-      if (varCount === 0) return data;
-
-      // Read first variant to get function name
-      let offset = 1; // skip count byte
-      offset += 1; // skip index
-      const type0 = extraData.readUInt8(offset); offset += 1;
-      if (type0 !== 2 || offset + 4 > extraData.length) return data;
-
-      const strLen = extraData.readUInt32LE(offset); offset += 4;
-      if (offset + strLen > extraData.length) return data;
-
-      const funcName = extraData.toString("utf8", offset, offset + strLen);
-      if (funcName !== "OnSendToServer") return data;
-
-      // Parse all variants: [0]=funcName, [1]=port, [2]=token, [3]=user, [4]=address
-      logger.info(`[${session.clientId}] Intercepted OnSendToServer`);
-
-      let realPort = 17091;
-      let realToken = 0;
-      let realUser = 0;
-      let realAddress = null;
-      let addressFull = "127.0.0.1|0|";
-
-      try {
-        let off2 = 1;
-        for (let vi = 0; vi < varCount && off2 < extraData.length; vi++) {
-          const vIdx = extraData.readUInt8(off2); off2 += 1;
-          const vType = extraData.readUInt8(off2); off2 += 1;
-          if (vType === 1) { off2 += 4; }
-          else if (vType === 2) {
-            const sLen = extraData.readUInt32LE(off2); off2 += 4;
-            if (vIdx === 4) {
-              addressFull = extraData.toString("utf8", off2, off2 + sLen);
-              realAddress = addressFull.split("|")[0];
-            }
-            off2 += sLen;
-          }
-          else if (vType === 3) { off2 += 8; }
-          else if (vType === 4) { off2 += 12; }
-          else if (vType === 5) {
-            if (vIdx === 1) realPort = extraData.readUInt32LE(off2);
-            else if (vIdx === 2) realToken = extraData.readUInt32LE(off2);
-            else if (vIdx === 3) realUser = extraData.readUInt32LE(off2);
-            off2 += 4;
-          }
-          else if (vType === 9) {
-            if (vIdx === 1) realPort = extraData.readInt32LE(off2);
-            else if (vIdx === 2) realToken = extraData.readInt32LE(off2);
-            else if (vIdx === 3) realUser = extraData.readInt32LE(off2);
-            off2 += 4;
-          }
-        }
-      } catch (e) { /* parsing error, use defaults */ }
-
-      if (realAddress) {
-        logger.info(`[${session.clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
-        this.pendingServerQueue.push({ host: realAddress, port: realPort });
+    // Log server text packets (type 2 / type 3)
+    if (msgType === 2 || msgType === 3) {
+      const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
+      if (text.trim()) {
+        logger.debug(`[${session.clientId}] Server text (type ${msgType}): ${text.substring(0, 120)}`);
       }
+    }
 
-      // Rewrite: redirect client back to our proxy, preserving token/user/doorId
-      const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
-      const addrParts = addressFull.split("|");
-      addrParts[0] = proxyHost;
-      const rewrittenAddr = addrParts.join("|");
+    // Only parse TANK packets (type 4) with sufficient length
+    if (msgType !== 4 || data.length <= 60) return data;
 
-      return PacketHandler.buildVariantPacket([
-        { type: 2, value: "OnSendToServer" },
-        { type: 9, value: config.proxy.port },
-        { type: 9, value: realToken },
-        { type: 9, value: realUser },
-        { type: 2, value: rewrittenAddr },
-      ], -1, 0);
-    } catch (e) {
-      // Failed to parse — pass through unmodified
+    const tankType = data.readUInt32LE(4);
+
+    // Log TANK events (tile updates, item objects, etc.)
+    if (tankType !== 1) {
+      this.gameEventLogger.processTankPacket(tankType, data.slice(4));
       return data;
     }
+
+    // CALL_FUNCTION (tankType 1) — parse variant list
+    const extraDataSize = data.readUInt32LE(56);
+    if (extraDataSize === 0 || data.length < 60 + extraDataSize) return data;
+
+    const extraData = data.slice(60);
+
+    // Parse variants using the proper parser
+    const variants = PacketHandler.parseVariantList(extraData);
+    if (variants.length === 0) return data;
+
+    // Log the game event
+    this.gameEventLogger.processVariantCall(variants, session.clientId);
+
+    // Handle OnSendToServer — rewrite target to proxy
+    const funcName = (variants[0] && variants[0].type === 2) ? variants[0].value : "";
+    if (funcName !== "OnSendToServer") return data;
+
+    logger.info(`[${session.clientId}] Intercepted OnSendToServer`);
+
+    let realPort = 17091;
+    let realToken = 0;
+    let realUser = 0;
+    let realAddress = null;
+    let addressFull = "127.0.0.1|0|";
+
+    for (const v of variants) {
+      if (v.index === 1 && (v.type === 5 || v.type === 9)) realPort = v.value;
+      if (v.index === 2 && (v.type === 5 || v.type === 9)) realToken = v.value;
+      if (v.index === 3 && (v.type === 5 || v.type === 9)) realUser = v.value;
+      if (v.index === 4 && v.type === 2) {
+        addressFull = v.value;
+        realAddress = addressFull.split("|")[0];
+      }
+    }
+
+    if (realAddress) {
+      logger.info(`[${session.clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
+      this.pendingServerQueue.push({ host: realAddress, port: realPort });
+    }
+
+    // Rewrite: redirect client back to our proxy, preserving token/user/doorId
+    const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
+    const addrParts = addressFull.split("|");
+    addrParts[0] = proxyHost;
+    const rewrittenAddr = addrParts.join("|");
+
+    return PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnSendToServer" },
+      { type: 9, value: config.proxy.port },
+      { type: 9, value: realToken },
+      { type: 9, value: realUser },
+      { type: 2, value: rewrittenAddr },
+    ], -1, 0);
+  }
+
+  // ── Device Spoofing ───────────────────────────────────────────────
+
+  /**
+   * Generate random device fingerprints for spoofing.
+   */
+  generateSpoofState() {
+    const spoofConfig = config.spoof || {};
+    if (!spoofConfig.enabled) return { enabled: false };
+
+    const randomMAC = () => {
+      // Generate unicast MAC (first byte even)
+      const bytes = crypto.randomBytes(6);
+      bytes[0] = (bytes[0] & 0xfe) | 0x02; // unicast + locally administered
+      return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join(":");
+    };
+
+    const randomHex = (len) => crypto.randomBytes(len).toString("hex");
+    const randomInt = () => crypto.randomBytes(4).readUInt32LE(0);
+    const randomSignedInt = () => crypto.randomBytes(4).readInt32LE(0);
+
+    return {
+      enabled: true,
+      mac: spoofConfig.mac === "random" ? randomMAC() : (spoofConfig.mac || randomMAC()),
+      rid: spoofConfig.rid === "random" ? randomHex(16).toUpperCase() : (spoofConfig.rid || randomHex(16)),
+      hash: spoofConfig.hash === "random" ? randomInt() : (spoofConfig.hash || randomInt()),
+      hash2: spoofConfig.hash2 === "random" ? randomInt() : (spoofConfig.hash2 || randomInt()),
+      fhash: spoofConfig.fhash === "random" ? randomSignedInt() : (spoofConfig.fhash || randomSignedInt()),
+      zf: spoofConfig.zf === "random" ? randomSignedInt() : (spoofConfig.zf || randomSignedInt()),
+    };
+  }
+
+  /**
+   * Modify login info packet to spoof device fingerprints.
+   * Returns modified payload Buffer, or original if spoofing is disabled.
+   */
+  spoofLoginInfo(session, data) {
+    let text = data.toString("utf8", 4).replace(/\0+$/, "");
+
+    // Parse the login pairs for logging
+    const pairs = {};
+    for (const line of text.split("\n")) {
+      const idx = line.indexOf("|");
+      if (idx !== -1) pairs[line.substring(0, idx)] = line.substring(idx + 1);
+    }
+
+    // Log original login info
+    this.gameEventLogger.logLoginInfo(pairs);
+
+    if (!this.spoofState.enabled) return data;
+
+    // Replace device fingerprints
+    const replace = (key, value) => {
+      const regex = new RegExp(`^${key}\\|.+$`, "m");
+      if (regex.test(text)) {
+        text = text.replace(regex, `${key}|${value}`);
+      }
+    };
+
+    replace("mac", this.spoofState.mac);
+    replace("rid", this.spoofState.rid);
+    replace("hash", this.spoofState.hash);
+    replace("hash2", this.spoofState.hash2);
+    replace("fhash", this.spoofState.fhash);
+    replace("zf", this.spoofState.zf);
+
+    logger.info(`[${session.clientId}] ✓ Spoofed login: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
+
+    // Rebuild the binary payload
+    const header = Buffer.alloc(4);
+    header.writeUInt32LE(2, 0);
+    return Buffer.concat([header, Buffer.from(text, "utf8")]);
   }
 
   // ── Utility ────────────────────────────────────────────────────────
@@ -774,7 +797,6 @@ class GrowtopiaProxy {
     if (!session) return;
 
     if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
-    if (session.fallbackTimer) clearTimeout(session.fallbackTimer);
 
     this.sessions.delete(clientKey);
     this.commandHandler.clearUserState(session.clientId);
@@ -806,6 +828,14 @@ const proxy = new GrowtopiaProxy();
 const loginServer = new LoginServer();
 const gameLauncher = new GameLauncher();
 
+// Show startup banner
+Logger.banner([
+  "dqymon-proxy v1.0",
+  `Platform: ${process.platform} ${process.arch}`,
+  `Time: ${new Date().toLocaleString()}`,
+]);
+Logger.section("Initializing");
+
 // The proxy needs access to the loginServer to read dynamic server address
 proxy.loginServer = loginServer;
 loginServer.gameLog = gameLog;
@@ -828,10 +858,12 @@ loginServer.start();
 
 // 3. Run diagnostics after servers are up
 setTimeout(() => {
+  Logger.section("Diagnostics");
   loginServer.diagnose();
 }, 2000);
 
 // 4. Redirect Growtopia domains to 127.0.0.1 & launch the game
+Logger.section("Network Setup");
 if (config.game && config.game.modifyHosts !== false) {
   const hostsOk = gameLauncher.modifyHosts();
   if (hostsOk) {
@@ -854,6 +886,7 @@ if (config.game && config.game.autoLaunch !== false) {
 }
 
 // Keep the console window alive
+Logger.section("Ready");
 logger.info("Proxy is running. Press Ctrl+C to stop.");
 logger.info(`Game log: ${gameLog.logPath}`);
 if (process.stdin.isTTY) {
