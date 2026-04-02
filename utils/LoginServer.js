@@ -227,12 +227,12 @@ class LoginServer {
             this.logger.info(`[LOGIN] Real GT server: ${this.realServerHost}:${this.realServerPort}`);
             if (loginUrlMatch) this.logger.info(`[LOGIN] loginurl: ${loginUrlMatch[1].trim()}`);
 
-            // Detect maintenance mode and warn prominently
+            // Detect maintenance flag (note: server often still accepts connections)
             const maintMatch = body.match(/^#maint\|(.+)$/m);
             if (maintMatch) {
               this.maintenanceDetected = true;
-              this.logger.warn(`[LOGIN] ⚠ SERVER IS IN MAINTENANCE: ${maintMatch[1].trim()}`);
-              this.logger.warn(`[LOGIN] ⚠ ENet connections will likely time out until maintenance ends!`);
+              this.logger.info(`[LOGIN] server_data has #maint flag: ${maintMatch[1].trim()}`);
+              this.logger.info(`[LOGIN] (server may still accept connections despite this flag)`);
             } else {
               this.maintenanceDetected = false;
             }

@@ -511,6 +511,151 @@ function testENetConnection(serverIP, serverPort) {
   });
 }
 
+// ── Step 5.5: UDP Internet Connectivity Test ────────────────────────
+// Sends a DNS query to 8.8.8.8:53 to verify that our process can
+// send AND receive UDP from the internet. If this fails, Windows
+// Firewall (or antivirus) is blocking inbound UDP responses.
+
+function testUdpConnectivity() {
+  return new Promise((resolve) => {
+    header("Step 5.5: UDP internet connectivity test");
+    info("Sending DNS query to 8.8.8.8:53 to verify UDP works...");
+
+    const sock = dgram.createSocket("udp4");
+    let received = false;
+
+    // Minimal DNS query for "google.com" type A
+    const dnsQuery = Buffer.from([
+      0x12, 0x34,  // Transaction ID
+      0x01, 0x00,  // Flags: standard query
+      0x00, 0x01,  // Questions: 1
+      0x00, 0x00,  // Answer RRs: 0
+      0x00, 0x00,  // Authority RRs: 0
+      0x00, 0x00,  // Additional RRs: 0
+      // Query: google.com, type A, class IN
+      0x06, 0x67, 0x6f, 0x6f, 0x67, 0x6c, 0x65,  // "google"
+      0x03, 0x63, 0x6f, 0x6d,                      // "com"
+      0x00,                                          // root
+      0x00, 0x01,  // Type A
+      0x00, 0x01,  // Class IN
+    ]);
+
+    sock.on("message", (msg, rinfo) => {
+      received = true;
+      ok(`UDP response received from ${rinfo.address}:${rinfo.port} (${msg.length}b)`);
+      ok("UDP internet connectivity WORKS — our process can receive UDP from the internet");
+      try { sock.close(); } catch {}
+    });
+
+    sock.on("error", (err) => {
+      warn(`UDP test socket error: ${err.message}`);
+    });
+
+    // Test 1: From random ephemeral port
+    sock.send(dnsQuery, 53, "8.8.8.8", (err) => {
+      if (err) {
+        fail(`Cannot send UDP: ${err.message}`);
+        resolve();
+        return;
+      }
+      try {
+        const addr = sock.address();
+        info(`Sent DNS query from :${addr.port} to 8.8.8.8:53`);
+      } catch {}
+    });
+
+    // Also test from port 17091 specifically
+    const sock17091 = dgram.createSocket({ type: "udp4", reuseAddr: true });
+    let received17091 = false;
+
+    sock17091.on("message", (msg, rinfo) => {
+      received17091 = true;
+      ok(`UDP response on port 17091 from ${rinfo.address}:${rinfo.port} (${msg.length}b)`);
+      ok("Port 17091 CAN receive UDP from the internet");
+      try { sock17091.close(); } catch {}
+    });
+
+    sock17091.on("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        warn("Port 17091 in use — skipping port-specific test");
+      }
+    });
+
+    try {
+      sock17091.bind(17091, "0.0.0.0", () => {
+        // Modify transaction ID to distinguish
+        const dnsQuery2 = Buffer.from(dnsQuery);
+        dnsQuery2.writeUInt16BE(0x5678, 0);
+        sock17091.send(dnsQuery2, 53, "8.8.8.8", (err) => {
+          if (err) return;
+          info("Sent DNS query from :17091 to 8.8.8.8:53");
+        });
+      });
+    } catch {}
+
+    setTimeout(() => {
+      if (!received) {
+        fail("No UDP response from 8.8.8.8:53 on ephemeral port after 5s");
+        fail("Windows Firewall or antivirus may be blocking INBOUND UDP for this process!");
+        info("Try: Windows Security → Firewall → Allow an app → add dqymon-diagnose.exe");
+      }
+      if (!received17091) {
+        warn("No UDP response on port 17091 after 5s");
+        info("This is the port the proxy uses — if blocked, relay cannot work");
+      }
+      try { sock.close(); } catch {}
+      try { sock17091.close(); } catch {}
+      resolve();
+    }, 5000);
+  });
+}
+
+// ── Firewall rules (Windows only) ───────────────────────────────────
+
+function addFirewallRules() {
+  if (process.platform !== "win32") return;
+  try {
+    const { execSync } = require("child_process");
+    const exePath = process.execPath;
+
+    // Program-level UDP inbound
+    execSync(
+      `netsh advfirewall firewall delete rule name="dqymon-diagnose UDP In" >nul 2>&1 & ` +
+      `netsh advfirewall firewall add rule name="dqymon-diagnose UDP In" dir=in action=allow protocol=UDP program="${exePath}" enable=yes >nul 2>&1`,
+      { stdio: "pipe" }
+    );
+
+    // Program-level UDP outbound
+    execSync(
+      `netsh advfirewall firewall delete rule name="dqymon-diagnose UDP Out" >nul 2>&1 & ` +
+      `netsh advfirewall firewall add rule name="dqymon-diagnose UDP Out" dir=out action=allow protocol=UDP program="${exePath}" enable=yes >nul 2>&1`,
+      { stdio: "pipe" }
+    );
+
+    // Port-specific rule for 17091 inbound
+    execSync(
+      `netsh advfirewall firewall delete rule name="dqymon-diagnose Port 17091" >nul 2>&1 & ` +
+      `netsh advfirewall firewall add rule name="dqymon-diagnose Port 17091" dir=in action=allow protocol=UDP localport=17091 enable=yes >nul 2>&1`,
+      { stdio: "pipe" }
+    );
+
+    ok("Windows Firewall rules added (UDP program-level + port 17091)");
+  } catch (err) {
+    warn(`Could not add firewall rules: ${err.message}`);
+    info("Run as Administrator if firewall rules fail");
+  }
+}
+
+function removeFirewallRules() {
+  if (process.platform !== "win32") return;
+  try {
+    const { execSync } = require("child_process");
+    execSync(`netsh advfirewall firewall delete rule name="dqymon-diagnose UDP In" >nul 2>&1`, { stdio: "pipe" });
+    execSync(`netsh advfirewall firewall delete rule name="dqymon-diagnose UDP Out" >nul 2>&1`, { stdio: "pipe" });
+    execSync(`netsh advfirewall firewall delete rule name="dqymon-diagnose Port 17091" >nul 2>&1`, { stdio: "pipe" });
+  } catch {}
+}
+
 // ── Step 6: RELAY TEST ──────────────────────────────────────────────
 // This is the CRITICAL test. It does exactly what the proxy does:
 //   - Start an HTTPS server on port 443 to serve modified server_data
@@ -909,9 +1054,9 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
   const httpsServers = await startRelayHttpsServer(serverDataBody);
   info("HTTPS login server ready");
 
-  // Step E: UDP sockets
-  const listenSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
-  const relaySocket = dgram.createSocket("udp4");
+  // Step E: Single UDP socket (matches the proxy's single-socket design)
+  // Uses port 17091 for BOTH receiving from client AND relaying to/from the GT server.
+  const udpSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
 
   let clientAddr = null;
   let clientPort = null;
@@ -921,85 +1066,84 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
   let serverPackets = 0;
   let gameProcess = null;
 
+  // Add firewall rules before UDP socket is set up
+  addFirewallRules();
+
   // Register cleanup handler for Ctrl+C / unexpected exit
   _relayCleanup = () => {
     restoreHosts();
     removeCert();
+    removeFirewallRules();
     httpsServers.close();
-    try { listenSocket.close(); } catch {}
-    try { relaySocket.close(); } catch {}
+    try { udpSocket.close(); } catch {}
     _relayCleanup = null;
   };
 
   return new Promise((resolve) => {
-    listenSocket.on("message", (msg, rinfo) => {
-      clientPackets++;
+    udpSocket.on("message", (msg, rinfo) => {
+      // Distinguish client vs server packets by source address
+      const isFromServer = rinfo.address === serverIP;
 
-      if (!clientConnected) {
-        clientConnected = true;
-        clientAddr = rinfo.address;
-        clientPort = rinfo.port;
+      if (isFromServer) {
+        // ── Server → Client relay ──
+        serverPackets++;
 
-        ok(`GT client ENet connected! ${rinfo.address}:${rinfo.port}`);
-        ok(`Captured real ENet packet: ${msg.length} bytes`);
-        dim(`Hex: ${hexDump(msg, 64)}`);
-
-        // ── Comprehensive packet format analysis ──
-        analyzePacket(msg);
-
-        info(`Relaying to real server ${serverIP}:${serverPort}...`);
-      }
-
-      // Relay EVERY client packet to the real server (unchanged)
-      relaySocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
-        if (err) {
-          fail(`Relay send failed: ${err.message}`);
-        } else if (clientPackets <= 5) {
-          try {
-            const addr = relaySocket.address();
-            ok(`Relayed ${msg.length}b to ${serverIP}:${serverPort} from :${addr.port} (pkt #${clientPackets})`);
-          } catch {
-            ok(`Relayed ${msg.length}b (pkt #${clientPackets})`);
-          }
+        if (!serverResponded) {
+          serverResponded = true;
+          console.log();
+          ok(`${GREEN}${BOLD}SERVER RESPONDED TO RELAYED PACKET!${RESET}`);
+          ok(`Response: ${msg.length}b from ${rinfo.address}:${rinfo.port}`);
+          dim(`Hex: ${hexDump(msg, 64)}`);
+          info("Analyzing server response packet:");
+          analyzePacket(msg);
         }
-      });
+
+        // Relay response back to game client
+        if (clientAddr && clientPort) {
+          udpSocket.send(msg, 0, msg.length, clientPort, clientAddr, () => {});
+        }
+      } else {
+        // ── Client → Server relay ──
+        clientPackets++;
+
+        if (!clientConnected) {
+          clientConnected = true;
+          clientAddr = rinfo.address;
+          clientPort = rinfo.port;
+
+          ok(`GT client ENet connected! ${rinfo.address}:${rinfo.port}`);
+          ok(`Captured real ENet packet: ${msg.length} bytes`);
+          dim(`Hex: ${hexDump(msg, 64)}`);
+
+          // ── Comprehensive packet format analysis ──
+          analyzePacket(msg);
+
+          info(`Relaying to real server ${serverIP}:${serverPort} from :17091...`);
+        }
+
+        // Relay EVERY client packet to the real server from THIS socket (port 17091)
+        udpSocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
+          if (err) {
+            fail(`Relay send failed: ${err.message}`);
+          } else if (clientPackets <= 5) {
+            ok(`Relayed ${msg.length}b to ${serverIP}:${serverPort} from :17091 (pkt #${clientPackets})`);
+          }
+        });
+      }
     });
 
-    relaySocket.on("message", (msg, rinfo) => {
-      serverPackets++;
-
-      if (!serverResponded) {
-        serverResponded = true;
-        console.log();
-        ok(`${GREEN}${BOLD}SERVER RESPONDED TO RELAYED PACKET!${RESET}`);
-        ok(`Response: ${msg.length}b from ${rinfo.address}:${rinfo.port}`);
-        dim(`Hex: ${hexDump(msg, 64)}`);
-        info("Analyzing server response packet:");
-        analyzePacket(msg);
-      }
-
-      // Relay response back to game client
-      if (clientAddr && clientPort) {
-        listenSocket.send(msg, 0, msg.length, clientPort, clientAddr, () => {});
-      }
-    });
-
-    listenSocket.on("error", (err) => {
+    udpSocket.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
         fail("Port 17091 already in use! Close the proxy first.");
       } else {
-        fail(`Listen error: ${err.message}`);
+        fail(`UDP socket error: ${err.message}`);
       }
       if (_relayCleanup) { _relayCleanup(); }
       resolve({ skipped: true });
     });
 
-    relaySocket.on("error", (err) => {
-      fail(`Relay socket error: ${err.message}`);
-    });
-
-    listenSocket.bind(17091, "0.0.0.0", () => {
-      ok("UDP listening on port 17091");
+    udpSocket.bind(17091, "0.0.0.0", () => {
+      ok("UDP listening on port 17091 (single-socket relay, same as proxy)");
       console.log();
 
       // Auto-launch Growtopia
@@ -1009,6 +1153,7 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
       }
       info("The game will get server_data from our HTTPS server,");
       info("then connect via ENet to port 17091. We relay to the real server.");
+      info("Using SINGLE socket — same design as the proxy.");
       info("Waiting 45 seconds...");
       console.log();
     });
@@ -1118,6 +1263,9 @@ async function main() {
   // Step 5: Crafted ENet test
   const enetResult = await testENetConnection(loginResult.ip, loginResult.port);
 
+  // Step 5.5: UDP internet connectivity test
+  await testUdpConnectivity();
+
   // Step 6: RELAY TEST
   console.log();
   const doRelay = await new Promise((resolve) => {
@@ -1147,6 +1295,7 @@ main().catch(async (err) => {
   if (_relayCleanup) { _relayCleanup(); }
   restoreHosts();
   removeCert();
+  removeFirewallRules();
   console.error(`\n${RED}[FATAL] ${err.message}${RESET}\n${err.stack}`);
   await pause();
   process.exit(1);
@@ -1157,11 +1306,13 @@ process.on("SIGINT", () => {
   if (_relayCleanup) { _relayCleanup(); }
   restoreHosts();
   removeCert();
+  removeFirewallRules();
   process.exit();
 });
 process.on("SIGTERM", () => {
   if (_relayCleanup) { _relayCleanup(); }
   restoreHosts();
   removeCert();
+  removeFirewallRules();
   process.exit();
 });

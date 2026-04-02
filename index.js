@@ -339,16 +339,13 @@ class GrowtopiaProxy {
           `[${clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
         );
         if (this.loginServer && this.loginServer.maintenanceDetected) {
-          logger.warn(
-            `[${clientId}] The server_data had #maint flag — server is likely in maintenance`
-          );
-          logger.warn(
-            `[${clientId}] MAC spoofing + game event logs only work AFTER handshake succeeds`
-          );
-          logger.warn(
-            `[${clientId}] Wait for maintenance to end, then restart the proxy`
+          logger.info(
+            `[${clientId}] Note: server_data had #maint flag (server may still accept connections)`
           );
         }
+        logger.warn(
+          `[${clientId}] MAC spoofing + game event logs only work AFTER handshake succeeds`
+        );
         logger.error(
           `[${clientId}] ✗ Run dqymon-diagnose.exe relay test to check if your machine can relay UDP`
         );
@@ -442,7 +439,7 @@ class GrowtopiaProxy {
           `[${session.clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
         );
         if (this.loginServer && this.loginServer.maintenanceDetected) {
-          logger.warn(`[${session.clientId}] The server_data had #maint flag — server may be in maintenance`);
+          logger.info(`[${session.clientId}] Note: server_data had #maint flag (server may still accept connections)`);
         }
         gameLog.logConnectionFail(
           session.clientId,
@@ -694,8 +691,8 @@ class GrowtopiaProxy {
       setTimeout(() => {
         if (!responded) {
           logger.warn(`[PROBE] ✗ No UDP response from ${host}:${port} after 5s`);
-          logger.warn(`[PROBE] This confirms the GT server is not accepting ENet connections`);
-          logger.warn(`[PROBE] (likely maintenance mode — #maint was in server_data)`);
+          logger.warn(`[PROBE] GT server did not respond to our crafted probe`);
+          logger.info(`[PROBE] This is normal — GT uses obfuscated ENet that rejects non-client packets`);
           try { probe.close(); } catch (e) {}
           resolve(false);
         }
