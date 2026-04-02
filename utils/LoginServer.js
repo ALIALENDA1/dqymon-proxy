@@ -494,6 +494,10 @@ class LoginServer {
           if (this.gameLog) {
             this.gameLog.logLogin(true, `server_data → ${this.realServerHost}:${this.realServerPort}`);
           }
+          // Notify proxy that a new login occurred — stale sessions should be cleared
+          if (this.onNewLogin) {
+            this.onNewLogin(this.realServerHost, this.realServerPort);
+          }
         })
         .catch((err) => {
           this.logger.error(`[LOGIN] Handler error: ${err.message}`);

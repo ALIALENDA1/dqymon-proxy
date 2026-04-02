@@ -79,7 +79,15 @@ class GrowtopiaProxy {
       // matching from capturing client packets (which would reflect them
       // back to the client instead of forwarding to the GT server).
       if (this.sessions.has(clientKey)) {
-        this.handleClientPacket(this.sessions.get(clientKey), msg, rinfo);
+        const session = this.sessions.get(clientKey);
+
+        // Detect ENet CONNECT from known client → game is retrying/reconnecting.
+        // Reset the session to use the latest server from login server.
+        if (this.isENetConnect(msg)) {
+          this.resetSession(clientKey, session);
+        }
+
+        this.handleClientPacket(session, msg, rinfo);
         return;
       }
 
@@ -164,6 +172,7 @@ class GrowtopiaProxy {
     session.lastActivity = Date.now();
     session.clientPackets = (session.clientPackets || 0) + 1;
     this.totalClientPackets++;
+    gameLog.logPacketSent();
 
     // Log first few packets and then periodically
     if (session.clientPackets <= 10 || session.clientPackets % 50 === 0) {
@@ -210,6 +219,7 @@ class GrowtopiaProxy {
     session.lastActivity = Date.now();
     session.serverPackets = (session.serverPackets || 0) + 1;
     this.totalServerPackets++;
+    gameLog.logPacketReceived();
 
     // First server response = ENet handshake progressing
     if (session.serverPackets === 1) {
@@ -336,6 +346,100 @@ class GrowtopiaProxy {
         );
       }
     }, 15000);
+  }
+
+  /**
+   * Detect if a raw UDP datagram is an ENet CONNECT packet.
+   * GT CONNECT packets are typically 44 bytes with a CONNECT command (type 2)
+   * at offset 4 (hidden sentTime, no checksum).
+   */
+  isENetConnect(buf) {
+    if (buf.length < 8) return false;
+    const parsed = ENetParser.parseDatagram(buf);
+    if (!parsed || parsed.commands.length === 0) return false;
+    return parsed.commands[0].cmdType === ENetParser.CMD.CONNECT;
+  }
+
+  /**
+   * Reset an existing session when the client sends a new CONNECT.
+   * This happens when:
+   *  - Maintenance ended and the game retries
+   *  - The game cancels and reconnects
+   *  - Sub-server redirect
+   *
+   * Updates the target server to the latest from loginServer,
+   * resets counters and state, and regenerates spoof identity.
+   */
+  resetSession(clientKey, session) {
+    // Determine new target server
+    let newHost, newPort;
+    if (this.pendingServerQueue.length > 0) {
+      const pending = this.pendingServerQueue.shift();
+      newHost = pending.host;
+      newPort = pending.port;
+    } else if (this.loginServer && this.loginServer.realServerHost) {
+      newHost = this.loginServer.realServerHost;
+      newPort = this.loginServer.realServerPort;
+    } else {
+      newHost = session.serverHost;
+      newPort = session.serverPort;
+    }
+
+    const serverChanged = newHost !== session.serverHost || newPort !== session.serverPort;
+
+    // Clear old no-response timer
+    if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
+
+    // Log the reset
+    if (serverChanged) {
+      logger.info(`[${session.clientId}] Session reset: ${session.serverHost}:${session.serverPort} → ${newHost}:${newPort}`);
+    } else {
+      logger.info(`[${session.clientId}] Session reset (reconnection attempt to ${newHost}:${newPort})`);
+    }
+
+    // Update session state
+    session.serverHost = newHost;
+    session.serverPort = newPort;
+    session.clientPackets = 0;
+    session.serverPackets = 0;
+    session.handshakeComplete = false;
+    session.loginReceived = false;
+    session.lastActivity = Date.now();
+
+    // Regenerate spoof identity for the new connection
+    this.spoofState = this.generateSpoofState();
+    if (this.spoofState.enabled) {
+      logger.info(`[${session.clientId}] ✓ New spoof identity: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
+    }
+
+    // Reset game event logger state
+    this.gameEventLogger.currentWorld = "";
+    this.gameEventLogger.playerName = "";
+    this.gameEventLogger.localNetID = -1;
+    this.gameEventLogger.players.clear();
+
+    // New no-response timer
+    session.noResponseTimer = setTimeout(() => {
+      if (!this.sessions.has(clientKey)) return;
+      if (!session.serverPackets) {
+        logger.error(
+          `[${session.clientId}] ✗ ENet handshake FAILED — GT server ${newHost}:${newPort} did not respond`
+        );
+        logger.error(
+          `[${session.clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
+        );
+        if (this.loginServer && this.loginServer.maintenanceDetected) {
+          logger.warn(`[${session.clientId}] The server_data had #maint flag — server may be in maintenance`);
+        }
+        gameLog.logConnectionFail(
+          session.clientId,
+          `${newHost}:${newPort}`,
+          `No response after 15s (sent ${session.clientPackets} pkts)`
+        );
+      }
+    }, 15000);
+
+    gameLog.logConnection(session.clientId, `${newHost}:${newPort}`);
   }
 
   // ── Reachability Testing ─────────────────────────────────────────
@@ -898,8 +1002,7 @@ class GrowtopiaProxy {
     this.sessions.delete(clientKey);
     this.commandHandler.clearUserState(session.clientId);
 
-    gameLog.logPackets(this.totalClientPackets, this.totalServerPackets);
-    logger.info(`[${session.clientId}] Session cleaned up`);
+    logger.info(`[${session.clientId}] Session cleaned up (${session.clientPackets} sent, ${session.serverPackets} received)`);
   }
 
   cleanupStaleSessions() {
@@ -936,6 +1039,18 @@ Logger.section("Initializing");
 // The proxy needs access to the loginServer to read dynamic server address
 proxy.loginServer = loginServer;
 loginServer.gameLog = gameLog;
+
+// When a new login (server_data) is served, clear stale sessions.
+// The game client may reconnect from the same or a different port.
+loginServer.onNewLogin = (host, port) => {
+  for (const [key, session] of proxy.sessions) {
+    // Only clear sessions that haven't completed handshake or target a different server
+    if (!session.handshakeComplete || session.serverHost !== host || session.serverPort !== port) {
+      logger.info(`[${session.clientId}] Clearing stale session (new login → ${host}:${port})`);
+      proxy.cleanup(key);
+    }
+  }
+};
 
 // Restore hosts file on any exit
 function cleanup() {

@@ -85,8 +85,16 @@ class GameLog {
   }
 
   logPackets(clientCount, serverCount) {
-    this.stats.totalClientPackets = clientCount;
-    this.stats.totalServerPackets = serverCount;
+    this.stats.totalClientPackets += clientCount;
+    this.stats.totalServerPackets += serverCount;
+  }
+
+  logPacketSent() {
+    this.stats.totalClientPackets++;
+  }
+
+  logPacketReceived() {
+    this.stats.totalServerPackets++;
   }
 
   logMaintenance(msg) {
