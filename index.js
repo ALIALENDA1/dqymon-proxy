@@ -81,10 +81,23 @@ class GrowtopiaProxy {
       if (this.sessions.has(clientKey)) {
         const session = this.sessions.get(clientKey);
 
-        // Detect ENet CONNECT from known client → game is retrying/reconnecting.
-        // Reset the session to use the latest server from login server.
+        // Detect ENet CONNECT from known client.
+        // Only reset the session if something meaningful changed:
+        //  - A new login gave us a different server target
+        //  - There's a pending sub-server redirect
+        //  - The session had a completed handshake (genuine reconnect)
+        // Otherwise it's just a CONNECT retransmit → forward as-is.
         if (this.isENetConnect(msg)) {
-          this.resetSession(clientKey, session);
+          const latestHost = this.loginServer?.realServerHost;
+          const latestPort = this.loginServer?.realServerPort;
+          const serverChanged = latestHost && latestPort &&
+            (latestHost !== session.serverHost || latestPort !== session.serverPort);
+          const wasConnected = session.handshakeComplete || session.serverPackets > 0;
+
+          if (serverChanged || wasConnected || this.pendingServerQueue.length > 0) {
+            this.resetSession(clientKey, session);
+          }
+          // else: just a CONNECT retransmit during handshake — forward as-is
         }
 
         this.handleClientPacket(session, msg, rinfo);
@@ -535,30 +548,19 @@ class GrowtopiaProxy {
     if (buf.length < 4) return;
 
     const peerIDField = buf.readUInt16BE(0);
-    const hasSentTime = !!(peerIDField & 0x8000);
     const isCompressed = !!(peerIDField & 0x4000);
-    const rawPeerID = peerIDField & 0x0FFF;
 
     if (isCompressed) {
       logger.debug(`[${session.clientId}]${dirTag} Compressed datagram — forwarded as-is`);
       return;
     }
 
-    // ── Try all possible header layouts ────────────────────────────
-    // GT uses a modified ENet. We try every combination of sentTime and
-    // checksum position to find a layout where the command byte is valid
-    // and (if checksum is present) the CRC32 matches.
-    const layouts = [];
-
-    // Standard: flags from peerID field
-    const baseOffset = 2 + (hasSentTime ? 2 : 0);
-    layouts.push({ name: "std", cmdOffset: baseOffset, crcOffset: -1 });
-    layouts.push({ name: "std+crc", cmdOffset: baseOffset + 4, crcOffset: baseOffset });
-
-    // Force sentTime ON (GT might always include sentTime regardless of flag)
-    if (!hasSentTime) {
-      layouts.push({ name: "forceST", cmdOffset: 4, crcOffset: -1 });
-      layouts.push({ name: "forceST+crc", cmdOffset: 8, crcOffset: 4 });
+    // Use the scoring parser for consistent results
+    const parsed = ENetParser.parseDatagram(buf);
+    if (!parsed) {
+      logger.debug(`[${session.clientId}]${dirTag} Unknown ENet format — bytes forwarded as-is`);
+      this.scanForGTSignatures(session, buf, dirTag);
+      return;
     }
 
     const cmdNames = {
@@ -567,65 +569,35 @@ class GrowtopiaProxy {
       9: "SEND_UNSEQUENCED", 10: "BW_LIMIT", 11: "THROTTLE", 12: "SEND_UNRELIABLE_FRAG",
     };
 
-    let bestParse = null;
+    const crcStr = parsed.hasChecksum ? "CRC32" : "no-CRC";
+    const stStr = parsed.hasSentTime ? "sentTime" : "no-ST";
+    const cmdSummary = parsed.commands
+      .map(c => cmdNames[c.cmdType] || `cmd${c.cmdType}`)
+      .join("+");
 
-    for (const layout of layouts) {
-      if (layout.cmdOffset >= buf.length) continue;
+    logger.debug(
+      `[${session.clientId}]${dirTag} Parse: hdr=${parsed.headerSize}b [${stStr},${crcStr}] ` +
+      `cmds=${cmdSummary} (score=${parsed.score})`
+    );
 
-      const cmdByte = buf[layout.cmdOffset];
-      const cmdType = cmdByte & 0x0F;
-      if (cmdType < 1 || cmdType > 12) continue;
+    // Only extract GT payload from data-carrying commands (not CONNECT/ACK/etc.)
+    for (const cmd of parsed.commands) {
+      if (cmd.dataLen >= 4 && (
+        cmd.cmdType === ENetParser.CMD.SEND_RELIABLE ||
+        cmd.cmdType === ENetParser.CMD.SEND_UNRELIABLE
+      )) {
+        const gtType = buf.readUInt32LE(cmd.dataStart);
+        const gtName = { 1: "HELLO", 2: "LOGIN", 3: "TEXT", 4: "TANK" }[gtType] || "?";
+        logger.info(
+          `[${session.clientId}]${dirTag} GT payload: type=${gtType} (${gtName}) len=${cmd.dataLen}b`
+        );
 
-      const cmdName = cmdNames[cmdType];
-      let crcOk = null;
-
-      if (layout.crcOffset >= 0 && layout.crcOffset + 4 <= buf.length) {
-        const stored = buf.readUInt32LE(layout.crcOffset);
-        const testBuf = Buffer.from(buf);
-        testBuf.writeUInt32LE(0, layout.crcOffset);
-        const computed = GrowtopiaProxy.crc32(testBuf);
-        crcOk = stored === computed;
-      }
-
-      const quality = (crcOk === true ? 2 : 0) + (cmdType >= 1 && cmdType <= 12 ? 1 : 0);
-      if (!bestParse || quality > bestParse.quality) {
-        bestParse = { layout: layout.name, cmdByte, cmdType, cmdName, crcOk, quality, cmdOffset: layout.cmdOffset };
-      }
-    }
-
-    if (bestParse) {
-      const crcStr = bestParse.crcOk === true ? "CRC32✓" : bestParse.crcOk === false ? "CRC32✗" : "no-CRC";
-      logger.debug(
-        `[${session.clientId}]${dirTag} Parse: [${bestParse.layout}] ` +
-        `cmd=0x${bestParse.cmdByte.toString(16)}→${bestParse.cmdName} (${crcStr})`
-      );
-
-      // For data-carrying commands, try to extract the GT payload
-      if ((bestParse.cmdType === 6 || bestParse.cmdType === 7) && buf.length > bestParse.cmdOffset + 6) {
-        const dataLenOffset = bestParse.cmdType === 6 ? bestParse.cmdOffset + 4 : bestParse.cmdOffset + 6;
-        if (dataLenOffset + 2 <= buf.length) {
-          const dataLen = buf.readUInt16BE(dataLenOffset);
-          const dataStart = dataLenOffset + 2;
-          if (dataStart + 4 <= buf.length) {
-            const gtType = buf.readUInt32LE(dataStart);
-            logger.info(
-              `[${session.clientId}]${dirTag} GT payload: type=${gtType} ` +
-              `(${gtType === 1 ? "HELLO" : gtType === 2 ? "LOGIN" : gtType === 3 ? "TEXT" : gtType === 4 ? "TANK" : "?"}) ` +
-              `len=${dataLen}b`
-            );
-
-            // Dump first 120 chars of text for types 2 and 3
-            if ((gtType === 2 || gtType === 3) && dataStart + 4 < buf.length) {
-              const textPart = buf.toString("utf8", dataStart + 4, Math.min(buf.length, dataStart + 4 + 120));
-              logger.debug(`[${session.clientId}]${dirTag} Text: ${textPart.replace(/[\r\n]/g, "\\n").substring(0, 120)}`);
-            }
-          }
+        // Dump first 120 chars of text for types 2 and 3
+        if ((gtType === 2 || gtType === 3) && cmd.dataStart + 4 < buf.length) {
+          const textPart = buf.toString("utf8", cmd.dataStart + 4, Math.min(buf.length, cmd.dataStart + 4 + 120));
+          logger.debug(`[${session.clientId}]${dirTag} Text: ${textPart.replace(/[\r\n]/g, "\\n").substring(0, 120)}`);
         }
       }
-    } else {
-      logger.debug(
-        `[${session.clientId}]${dirTag} Unknown ENet format — bytes forwarded as-is`
-      );
     }
 
     // ── Scan for GT packet signatures in raw bytes ────────────────
