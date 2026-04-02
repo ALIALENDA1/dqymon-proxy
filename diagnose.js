@@ -1054,9 +1054,20 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
   const httpsServers = await startRelayHttpsServer(serverDataBody);
   info("HTTPS login server ready");
 
-  // Step E: Single UDP socket (matches the proxy's single-socket design)
-  // Uses port 17091 for BOTH receiving from client AND relaying to/from the GT server.
-  const udpSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  // Step E: DUAL-SOCKET relay (A/B test)
+  //
+  // Test A: listenSocket on 17091 (receives from client),
+  //         relaySocket on EPHEMERAL port (sends to GT server).
+  //         GT server responds to ephemeral port.
+  //
+  // Test B: If Test A fails after 25s, retry with SINGLE socket
+  //         (everything on port 17091, like the old proxy design).
+  //
+  // This A/B test determines whether GT server rejects connections
+  // from port 17091 (which is GT's own default server port).
+
+  const listenSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  const relaySocket = dgram.createSocket("udp4"); // ephemeral port
 
   let clientAddr = null;
   let clientPort = null;
@@ -1065,6 +1076,7 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
   let clientPackets = 0;
   let serverPackets = 0;
   let gameProcess = null;
+  let testPhase = "A"; // "A" = dual-socket (ephemeral), "B" = single-socket (17091)
 
   // Add firewall rules before UDP socket is set up
   addFirewallRules();
@@ -1075,75 +1087,118 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
     removeCert();
     removeFirewallRules();
     httpsServers.close();
-    try { udpSocket.close(); } catch {}
+    try { listenSocket.close(); } catch {}
+    try { relaySocket.close(); } catch {}
     _relayCleanup = null;
   };
 
   return new Promise((resolve) => {
-    udpSocket.on("message", (msg, rinfo) => {
-      // Distinguish client vs server packets by source address
-      const isFromServer = rinfo.address === serverIP;
+    // ── Server → Client (responses arrive on relaySocket in phase A, listenSocket in phase B) ──
 
-      if (isFromServer) {
-        // ── Server → Client relay ──
-        serverPackets++;
+    function handleServerResponse(msg, rinfo) {
+      serverPackets++;
 
-        if (!serverResponded) {
-          serverResponded = true;
-          console.log();
-          ok(`${GREEN}${BOLD}SERVER RESPONDED TO RELAYED PACKET!${RESET}`);
-          ok(`Response: ${msg.length}b from ${rinfo.address}:${rinfo.port}`);
-          dim(`Hex: ${hexDump(msg, 64)}`);
-          info("Analyzing server response packet:");
-          analyzePacket(msg);
+      if (!serverResponded) {
+        serverResponded = true;
+        console.log();
+        ok(`${GREEN}${BOLD}SERVER RESPONDED TO RELAYED PACKET! (Test ${testPhase})${RESET}`);
+        ok(`Response: ${msg.length}b from ${rinfo.address}:${rinfo.port}`);
+        dim(`Hex: ${hexDump(msg, 64)}`);
+        info("Analyzing server response packet:");
+        analyzePacket(msg);
+        if (testPhase === "A") {
+          ok("DUAL-SOCKET works! GT server responds to ephemeral port.");
+          info("→ The proxy should use a SEPARATE socket for server communication.");
+        } else {
+          ok("SINGLE-SOCKET works! GT server responds to port 17091.");
         }
+      }
 
-        // Relay response back to game client
-        if (clientAddr && clientPort) {
-          udpSocket.send(msg, 0, msg.length, clientPort, clientAddr, () => {});
-        }
-      } else {
-        // ── Client → Server relay ──
-        clientPackets++;
+      // Relay response back to game client
+      if (clientAddr && clientPort) {
+        listenSocket.send(msg, 0, msg.length, clientPort, clientAddr, () => {});
+      }
+    }
 
-        if (!clientConnected) {
-          clientConnected = true;
-          clientAddr = rinfo.address;
-          clientPort = rinfo.port;
+    relaySocket.on("message", (msg, rinfo) => {
+      handleServerResponse(msg, rinfo);
+    });
 
-          ok(`GT client ENet connected! ${rinfo.address}:${rinfo.port}`);
-          ok(`Captured real ENet packet: ${msg.length} bytes`);
-          dim(`Hex: ${hexDump(msg, 64)}`);
+    // ── Client → Server (always arrives on listenSocket:17091) ──
 
-          // ── Comprehensive packet format analysis ──
-          analyzePacket(msg);
+    listenSocket.on("message", (msg, rinfo) => {
+      // In phase B (single-socket), server responses also arrive here
+      if (testPhase === "B" && rinfo.address === serverIP) {
+        handleServerResponse(msg, rinfo);
+        return;
+      }
 
-          info(`Relaying to real server ${serverIP}:${serverPort} from :17091...`);
-        }
+      // Client packet
+      clientPackets++;
 
-        // Relay EVERY client packet to the real server from THIS socket (port 17091)
-        udpSocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
+      if (!clientConnected) {
+        clientConnected = true;
+        clientAddr = rinfo.address;
+        clientPort = rinfo.port;
+
+        ok(`GT client ENet connected! ${rinfo.address}:${rinfo.port}`);
+        ok(`Captured real ENet packet: ${msg.length} bytes`);
+        dim(`Hex: ${hexDump(msg, 64)}`);
+
+        // ── Comprehensive packet format analysis ──
+        analyzePacket(msg);
+      }
+
+      if (testPhase === "A") {
+        // DUAL-SOCKET: relay via relaySocket (ephemeral port)
+        relaySocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
           if (err) {
             fail(`Relay send failed: ${err.message}`);
           } else if (clientPackets <= 5) {
-            ok(`Relayed ${msg.length}b to ${serverIP}:${serverPort} from :17091 (pkt #${clientPackets})`);
+            try {
+              const addr = relaySocket.address();
+              info(`[Test A] Relayed ${msg.length}b to ${serverIP}:${serverPort} from :${addr.port} (pkt #${clientPackets})`);
+            } catch {
+              info(`[Test A] Relayed ${msg.length}b (pkt #${clientPackets})`);
+            }
+          }
+        });
+      } else {
+        // SINGLE-SOCKET: relay via listenSocket (port 17091)
+        listenSocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
+          if (err) {
+            fail(`Relay send failed: ${err.message}`);
+          } else if (clientPackets <= 10) {
+            info(`[Test B] Relayed ${msg.length}b to ${serverIP}:${serverPort} from :17091 (pkt #${clientPackets})`);
           }
         });
       }
     });
 
-    udpSocket.on("error", (err) => {
+    listenSocket.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
         fail("Port 17091 already in use! Close the proxy first.");
       } else {
-        fail(`UDP socket error: ${err.message}`);
+        fail(`Listen socket error: ${err.message}`);
       }
       if (_relayCleanup) { _relayCleanup(); }
       resolve({ skipped: true });
     });
 
-    udpSocket.bind(17091, "0.0.0.0", () => {
-      ok("UDP listening on port 17091 (single-socket relay, same as proxy)");
+    relaySocket.on("error", (err) => {
+      warn(`Relay socket error: ${err.message}`);
+    });
+
+    listenSocket.bind(17091, "0.0.0.0", () => {
+      ok("UDP listening on port 17091 for GT client");
+      try {
+        const addr = relaySocket.address();
+        ok(`Relay socket on ephemeral port :${addr.port} for GT server`);
+      } catch {}
+      console.log();
+
+      info(`${BOLD}Test A: DUAL-SOCKET${RESET} — relay from ephemeral port (25s)`);
+      info("If GT server rejects port 17091, this should work.");
       console.log();
 
       // Auto-launch Growtopia
@@ -1152,13 +1207,30 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
         info(`${BOLD}${YELLOW}>>> PLEASE OPEN GROWTOPIA MANUALLY <<<${RESET}`);
       }
       info("The game will get server_data from our HTTPS server,");
-      info("then connect via ENet to port 17091. We relay to the real server.");
-      info("Using SINGLE socket — same design as the proxy.");
-      info("Waiting 45 seconds...");
+      info("then connect via ENet to port 17091.");
+      info("Waiting for GT client...");
       console.log();
     });
 
-    // 45 second timeout
+    // After 25 seconds, if Test A failed, switch to Test B
+    setTimeout(() => {
+      if (serverResponded) return; // Test A worked!
+
+      console.log();
+      warn(`Test A (dual-socket, ephemeral port) got 0 responses after 25s`);
+      info(`Switching to ${BOLD}Test B: SINGLE-SOCKET${RESET} — relay from port 17091 (25s)`);
+      testPhase = "B";
+      clientPackets = 0; // Reset counter for clean logging
+
+      if (clientConnected) {
+        info("GT client already connected — continuing to relay from :17091 now...");
+      } else {
+        info("Waiting for GT client packets...");
+      }
+      console.log();
+    }, 25000);
+
+    // Total 50 second timeout (25s per test)
     setTimeout(() => {
       if (_relayCleanup) { _relayCleanup(); }
       setTimeout(() => {
@@ -1166,11 +1238,12 @@ async function relayTest(serverIP, serverPort, serverDataBody) {
           skipped: false,
           clientConnected,
           serverResponded,
+          serverRespondedPhase: serverResponded ? testPhase : null,
           clientPackets,
           serverPackets,
         });
       }, 2000);
-    }, 45000);
+    }, 50000);
   });
 }
 
@@ -1205,25 +1278,34 @@ function printSummary(loginResult, enetResult, relayResult) {
       warn("Relay test: GT client did not connect (did you open Growtopia?)");
     } else if (relayResult.serverResponded) {
       console.log();
-      ok(`${GREEN}${BOLD}VERDICT: UDP RELAY WORKS!${RESET}`);
+      ok(`${GREEN}${BOLD}VERDICT: UDP RELAY WORKS! (Test ${relayResult.serverRespondedPhase})${RESET}`);
       ok("Server responded to relayed packet.");
       info(`Client sent ${relayResult.clientPackets} packets, server sent ${relayResult.serverPackets} packets`);
+      if (relayResult.serverRespondedPhase === "A") {
+        ok("DUAL-SOCKET relay works — GT server responds to ephemeral port.");
+        info("→ The proxy must use a SEPARATE socket for server communication,");
+        info("  NOT send from port 17091 (which GT server likely rejects).");
+      } else {
+        ok("SINGLE-SOCKET relay works — GT server responds to port 17091.");
+      }
       info("The relay mechanism works on this machine.");
-      info("If the full proxy still fails, the issue is in session management or packet handling.");
     } else {
       console.log();
-      fail(`${RED}${BOLD}VERDICT: RELAY FAILED \u2014 server did NOT respond to relayed packets.${RESET}`);
-      info(`Client sent ${relayResult.clientPackets} packets \u2192 all relayed \u2192 0 responses.`);
+      fail(`${RED}${BOLD}VERDICT: RELAY FAILED — server did NOT respond to relayed packets.${RESET}`);
+      info(`Tested BOTH dual-socket (ephemeral port) and single-socket (port 17091).`);
+      info(`Client sent ${relayResult.clientPackets} packets → all relayed → 0 responses.`);
       info("Your GT client sent real ENet packets, we forwarded the EXACT bytes,");
-      info("but the GT server ignored them.");
+      info("but the GT server ignored them in BOTH configurations.");
       console.log();
-      info("This is the SAME thing the proxy does. The problem is NOT the proxy code.");
-      info("Possible causes:");
-      info("  1. Windows Firewall blocks INBOUND UDP responses to this process");
-      info("  2. The GT server validates the source IP/port in some way");
-      info("  3. Your router/NAT has UPnP rules that only map the real GT client");
-      info("  4. Anti-cheat / anti-tamper in the game detects the relay");
-      info("  5. The server IP in server_data is a relay/CDN that pins the source");
+      info("Since UDP internet connectivity works (DNS test passed),");
+      info("and both port configurations failed, the GT server likely:");
+      info("  1. Validates the ENet CONNECT packet contents against transport info");
+      info("     (e.g., the packet was crafted for 127.0.0.1, not the real server IP)");
+      info("  2. Uses a custom ENet handshake that rejects relayed packets");
+      info("  3. Anti-relay: the CONNECT packet embeds destination address hash");
+      console.log();
+      info("NEXT STEP: A proper ENet proxy is needed — two separate ENet");
+      info("connections (client↔proxy and proxy↔server), not raw byte relay.");
     }
   } else if (relayResult && relayResult.skipped) {
     warn("Relay test: Skipped");
