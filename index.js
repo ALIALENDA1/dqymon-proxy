@@ -49,12 +49,9 @@ class GrowtopiaProxy {
   constructor() {
     // clientKey ("addr:port") → session object
     this.sessions = new Map();
-    // Reverse lookup: "serverHost:serverPort" → session
-    // Used to route GT server responses back to the correct client.
-    this.serverMap = new Map();
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
-    this.proxySocket = null;       // Single UDP socket for ALL traffic
+    this.proxySocket = null;       // Client-facing UDP socket
     this.loginServer = null;       // set after construction
     // Queue of pending sub-server redirects (survives session teardown).
     this.pendingServerQueue = [];
@@ -64,18 +61,9 @@ class GrowtopiaProxy {
   }
 
   start() {
-    this.proxySocket = dgram.createSocket("udp4");
+    this.proxySocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
 
     this.proxySocket.on("message", (msg, rinfo) => {
-      // ── Check if this is a RESPONSE from a known GT server ──
-      const serverKey = `${rinfo.address}:${rinfo.port}`;
-      const serverSession = this.serverMap.get(serverKey);
-      if (serverSession) {
-        this.handleServerMessage(serverSession, msg, rinfo);
-        return;
-      }
-
-      // ── Otherwise, it's a CLIENT packet ──
       const clientKey = `${rinfo.address}:${rinfo.port}`;
 
       if (!this.sessions.has(clientKey)) {
@@ -102,12 +90,11 @@ class GrowtopiaProxy {
       // Inspect Growtopia payloads inside the ENet datagram
       const modified = this.inspectClientDatagram(session, msg);
 
-      // Forward to real GT server using the SAME proxy socket.
-      // This means the GT server sees our publicIP:17091 as source,
-      // and responds to the same address — which our socket receives.
-      // This avoids creating ephemeral-port sockets that Windows
-      // firewall might block.
-      this.proxySocket.send(
+      // Forward to real GT server via the session's dedicated socket.
+      // Each session has its own UDP socket on an ephemeral port,
+      // so GT server responses arrive on that socket regardless of
+      // the source IP/port the server responds from.
+      session.serverSocket.send(
         modified, 0, modified.length,
         session.serverPort, session.serverHost,
         (err) => {
@@ -143,6 +130,10 @@ class GrowtopiaProxy {
     // First server response = connection established!
     if (session.serverPackets === 1) {
       logger.info(`[${session.clientId}] ✓ GT server responded! Connection established.`);
+      logger.info(
+        `[${session.clientId}] Response from ${rinfo.address}:${rinfo.port} ` +
+        `(expected ${session.serverHost}:${session.serverPort})`
+      );
       gameLog.logConnectionSuccess(
         session.clientId,
         `${session.serverHost}:${session.serverPort}`
@@ -173,10 +164,9 @@ class GrowtopiaProxy {
   }
 
   /**
-   * Create a new session for a client.
-   * No separate server socket — we use the single proxy socket for
-   * both directions. This keeps all traffic on port 17091, which
-   * already has firewall rules.
+   * Create a new session with a dedicated server-facing UDP socket.
+   * Each session gets its own socket so GT server responses arrive
+   * directly, regardless of the server's source IP/port.
    */
   createSession(clientKey, rinfo) {
     const clientId = crypto.randomBytes(6).toString("hex");
@@ -195,31 +185,37 @@ class GrowtopiaProxy {
       serverPort = config.serverConfig.port;
     }
 
+    // Each session gets its own UDP socket for server traffic.
+    // All responses arriving on this socket's ephemeral port belong to
+    // this session — no need to match by server IP/port.
+    const serverSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+
     const session = {
       clientId,
       clientAddr: rinfo.address,
       clientPort: rinfo.port,
       serverHost,
       serverPort,
+      serverSocket,
       lastActivity: Date.now(),
       clientPackets: 0,
       serverPackets: 0,
     };
 
-    // Register in both lookup maps
+    serverSocket.on("message", (msg, serverRinfo) => {
+      this.handleServerMessage(session, msg, serverRinfo);
+    });
+
+    serverSocket.on("error", (err) => {
+      logger.error(`[${clientId}] Server socket error: ${err.message}`);
+    });
+
+    serverSocket.bind(0, "0.0.0.0", () => {
+      const addr = serverSocket.address();
+      logger.info(`[${clientId}] Server socket bound to ${addr.address}:${addr.port}`);
+    });
+
     this.sessions.set(clientKey, session);
-    const serverKey = `${serverHost}:${serverPort}`;
-
-    // Clean up any old session using the same server address
-    const oldSession = this.serverMap.get(serverKey);
-    if (oldSession && oldSession !== session) {
-      const oldClientKey = `${oldSession.clientAddr}:${oldSession.clientPort}`;
-      if (oldSession.noResponseTimer) clearTimeout(oldSession.noResponseTimer);
-      this.sessions.delete(oldClientKey);
-      logger.info(`[${oldSession.clientId}] Replaced by new session`);
-    }
-    this.serverMap.set(serverKey, session);
-
     logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
     gameLog.logConnection(clientId, `${serverHost}:${serverPort}`);
 
@@ -236,15 +232,13 @@ class GrowtopiaProxy {
           `[${clientId}] ⚠ No response from GT server ${serverHost}:${serverPort} after 10 seconds!`
         );
         logger.warn(
-          `[${clientId}] ⚠ The server may be in maintenance, or outbound UDP is blocked.`
+          `[${clientId}] ⚠ Possible causes: Windows Firewall blocking inbound UDP, server maintenance, or network issue.`
         );
         gameLog.logConnectionFail(
           clientId,
           `${serverHost}:${serverPort}`,
           "No response after 10s"
         );
-        // Run a direct probe to confirm
-        this.probeServer(serverHost, serverPort);
       }
     }, 10000);
   }
@@ -576,10 +570,9 @@ class GrowtopiaProxy {
 
     if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
 
-    // Remove from server reverse-lookup map
-    const serverKey = `${session.serverHost}:${session.serverPort}`;
-    if (this.serverMap.get(serverKey) === session) {
-      this.serverMap.delete(serverKey);
+    // Close the per-session server socket
+    if (session.serverSocket) {
+      try { session.serverSocket.close(); } catch (e) {}
     }
 
     this.sessions.delete(clientKey);
