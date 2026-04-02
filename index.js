@@ -28,7 +28,6 @@ process.on("unhandledRejection", async (err) => {
 
 try {
 
-const dgram = require("dgram");
 const crypto = require("crypto");
 const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
@@ -36,24 +35,21 @@ const CommandHandler = require("./handlers/CommandHandler");
 const Logger = require("./utils/Logger");
 const LoginServer = require("./utils/LoginServer");
 const GameLauncher = require("./utils/GameLauncher");
-const ENetParser = require("./utils/ENetParser");
 const GameLog = require("./utils/GameLog");
 const GameEventLogger = require("./utils/GameEventLogger");
+const { Client: ENetClient } = require("growtopia.js");
 
 const logger = new Logger();
 const gameLog = new GameLog();
 
-// Session timeout: clean up sessions with no activity for 60 seconds
-const SESSION_TIMEOUT_MS = 60 * 1000;
-
 class GrowtopiaProxy {
   constructor() {
-    // clientKey ("addr:port") → session object
-    this.sessions = new Map();
+    this.serverClient = null;    // ENet server accepting game connections (port 17091)
+    this.outgoingClient = null;  // ENet client connecting to real GT server
+    this.session = null;         // Current active session
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
     this.gameEventLogger = new GameEventLogger();
-    this.clientSocket = null;      // Receives from Growtopia client (port 17091)
     this.loginServer = null;       // set after construction
     // Queue of pending sub-server redirects (survives session teardown).
     this.pendingServerQueue = [];
@@ -65,231 +61,80 @@ class GrowtopiaProxy {
   }
 
   start() {
-    // ── Single UDP socket (port 17091) ──
-    // Handles BOTH client and server traffic on the same port.
-    // Client sends here (127.0.0.1:17091), and we also send to the
-    // GT server FROM this port. This avoids firewall/NAT issues with
-    // ephemeral ports — responses come back to the same port.
-    this.clientSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
-
-    this.clientSocket.on("message", (msg, rinfo) => {
-      const clientKey = `${rinfo.address}:${rinfo.port}`;
-
-      // IMPORTANT: Check known clients FIRST to prevent wildcard server
-      // matching from capturing client packets (which would reflect them
-      // back to the client instead of forwarding to the GT server).
-      if (this.sessions.has(clientKey)) {
-        const session = this.sessions.get(clientKey);
-
-        // Detect ENet CONNECT from known client.
-        // Only reset the session if something meaningful changed:
-        //  - A new login gave us a different server target
-        //  - There's a pending sub-server redirect
-        //  - The session had a completed handshake (genuine reconnect)
-        // Otherwise it's just a CONNECT retransmit → forward as-is.
-        if (this.isENetConnect(msg)) {
-          const latestHost = this.loginServer?.realServerHost;
-          const latestPort = this.loginServer?.realServerPort;
-          const serverChanged = latestHost && latestPort &&
-            (latestHost !== session.serverHost || latestPort !== session.serverPort);
-          const wasConnected = session.handshakeComplete || session.serverPackets > 0;
-
-          if (serverChanged || wasConnected || this.pendingServerQueue.length > 0) {
-            this.resetSession(clientKey, session);
-          }
-          // else: just a CONNECT retransmit during handshake — forward as-is
-        }
-
-        this.handleClientPacket(session, msg, rinfo);
-        return;
+    // ── ENet Server (port 17091) ──
+    // Accepts incoming connections from the Growtopia game client.
+    // Uses GT's custom ENet handshake (useNewServerPacket).
+    this.serverClient = new ENetClient({
+      enet: {
+        ip: config.proxy.host === "0.0.0.0" ? "0.0.0.0" : config.proxy.host,
+        port: config.proxy.port,
+        maxPeers: 32,
+        channelLimit: 2,
+        useNewPacket: { asClient: false },
+        useNewServerPacket: true,
       }
-
-      // Check if this is a GT server response
-      const serverSession = this.findSessionForServerResponse(rinfo);
-      if (serverSession) {
-        this.handleServerMessage(serverSession, msg, rinfo);
-        return;
-      }
-
-      // New client connection
-      this.createSession(clientKey, rinfo);
-      this.handleClientPacket(this.sessions.get(clientKey), msg, rinfo);
     });
 
-    this.clientSocket.on("error", (err) => {
-      logger.error(`Socket error: ${err.message}`);
-    });
-
-    this.clientSocket.on("close", () => {
-      logger.warn("Socket closed unexpectedly");
-    });
-
-    this.clientSocket.bind(config.proxy.port, config.proxy.host, () => {
+    this.serverClient.on("ready", () => {
       logger.info(
-        `✓ Listening on ${config.proxy.host}:${config.proxy.port} (single socket mode)`
+        `✓ ENet server listening on ${config.proxy.host}:${config.proxy.port}`
       );
       if (this.spoofState.enabled) {
         logger.info(`✓ Spoofing: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
       }
     });
 
-    // Periodically clean up stale sessions
-    setInterval(() => this.cleanupStaleSessions(), 15000);
+    this.serverClient.on("connect", (netID) => this.onClientConnect(netID));
+    this.serverClient.on("raw", (netID, ch, data) => this.onClientData(netID, ch, data));
+    this.serverClient.on("disconnect", (netID) => this.onClientDisconnect(netID));
+    this.serverClient.on("error", (err) => {
+      logger.error(`ENet server error: ${err.message}`);
+    });
+
+    // Outgoing client is created lazily in onClientConnect() to avoid
+    // a crash in rusty_enet when two idle hosts with zero peers run
+    // their service loops simultaneously.
+
+    // Start the server
+    this.serverClient.listen();
   }
 
   /**
-   * Find a session matching a GT server response.
+   * Ensure the outgoing ENet client exists.
+   * Created lazily and reused across sessions.
    */
-  findSessionForServerResponse(rinfo) {
-    // Strategy 1: Exact IP:port match
-    for (const session of this.sessions.values()) {
-      if (rinfo.address === session.serverHost && rinfo.port === session.serverPort) {
-        return session;
-      }
-    }
+  ensureOutgoingClient() {
+    if (this.outgoingClient) return;
 
-    // Strategy 2: IP-only match (server might respond from a different port)
-    for (const session of this.sessions.values()) {
-      if (rinfo.address === session.serverHost) {
-        if (session.serverPackets === 0) {
-          logger.info(
-            `[${session.clientId}] Matched server by IP (port ${rinfo.port}, expected ${session.serverPort})`
-          );
-        }
-        return session;
+    this.outgoingClient = new ENetClient({
+      enet: {
+        ip: "0.0.0.0",
+        port: 0,
+        maxPeers: 1,
+        channelLimit: 2,
+        useNewPacket: { asClient: true },
+        useNewServerPacket: false,
       }
-    }
+    });
 
-    // Strategy 3: Wildcard — if one session, accept any non-client packet
-    if (this.sessions.size === 1) {
-      const session = this.sessions.values().next().value;
-      // Guard: never match the session's own client address
-      if (rinfo.address === session.clientAddr && rinfo.port === session.clientPort) {
-        return null;
-      }
-      if (session.serverPackets === 0) {
-        logger.info(
-          `[${session.clientId}] Matched server by wildcard (${rinfo.address}:${rinfo.port})`
-        );
-      }
-      return session;
-    }
+    this.outgoingClient.on("ready", () => {
+      logger.info(`✓ ENet outgoing client ready (port ${this.outgoingClient.host.port})`);
+    });
 
-    return null;
+    this.outgoingClient.on("connect", (netID) => this.onServerConnect(netID));
+    this.outgoingClient.on("raw", (netID, ch, data) => this.onServerData(netID, ch, data));
+    this.outgoingClient.on("disconnect", (netID) => this.onServerDisconnect(netID));
+    this.outgoingClient.on("error", (err) => {
+      logger.error(`ENet outgoing error: ${err.message}`);
+    });
+
+    this.outgoingClient.listen();
   }
 
   /**
-   * Handle a client packet — forward to GT server.
+   * Game client connected to our ENet server.
    */
-  handleClientPacket(session, msg, rinfo) {
-    session.lastActivity = Date.now();
-    session.clientPackets = (session.clientPackets || 0) + 1;
-    this.totalClientPackets++;
-    gameLog.logPacketSent();
-
-    // Log first few packets and then periodically
-    if (session.clientPackets <= 10 || session.clientPackets % 50 === 0) {
-      logger.info(
-        `[${session.clientId}] Client → Server: ${msg.length} bytes (pkt #${session.clientPackets})`
-      );
-    }
-
-    // Detailed ENet diagnostic for the first few packets to learn the format
-    if (session.clientPackets <= 5) {
-      this.logENetDiagnostic(session, msg, "C→S");
-    }
-
-    // Run the mirror test on the FIRST packet only
-    if (session.clientPackets === 1) {
-      this.mirrorTest(session, msg);
-    }
-
-    // Inspect and possibly modify Growtopia payloads (MAC spoofing, etc.)
-    const modified = this.inspectClientDatagram(session, msg);
-
-    // Forward to GT server from the SAME socket (port 17091).
-    // Single-socket avoids firewall/NAT blocking on ephemeral ports.
-    this.clientSocket.send(
-      modified, 0, modified.length,
-      session.serverPort, session.serverHost,
-      (err) => {
-        if (err) {
-          logger.error(`[${session.clientId}] Send to GT server failed: ${err.message}`);
-        } else if (session.clientPackets <= 3) {
-          logger.info(
-            `[${session.clientId}] ✓ Sent ${modified.length}b to ` +
-            `${session.serverHost}:${session.serverPort} from :${config.proxy.port}`
-          );
-        }
-      }
-    );
-  }
-
-  /**
-   * Handle a response from the GT server, relay it back to the client.
-   */
-  handleServerMessage(session, msg, rinfo) {
-    session.lastActivity = Date.now();
-    session.serverPackets = (session.serverPackets || 0) + 1;
-    this.totalServerPackets++;
-    gameLog.logPacketReceived();
-
-    // First server response = ENet handshake progressing
-    if (session.serverPackets === 1) {
-      logger.info(`[${session.clientId}] ✓ GT server responded! ENet handshake in progress...`);
-      gameLog.logConnectionSuccess(
-        session.clientId,
-        `${session.serverHost}:${session.serverPort}`
-      );
-    }
-
-    // Detect handshake completion: once we see data packets (not CONNECT/VERIFY_CONNECT)
-    if (!session.handshakeComplete) {
-      const parsed = ENetParser.parseDatagram(msg);
-      if (parsed) {
-        const hasDataCmd = parsed.commands.some(c =>
-          c.cmdType === ENetParser.CMD.SEND_RELIABLE ||
-          c.cmdType === ENetParser.CMD.SEND_UNRELIABLE
-        );
-        if (hasDataCmd) {
-          session.handshakeComplete = true;
-          logger.info(`[${session.clientId}] ✓ ENet handshake complete — game data flowing!`);
-          logger.info(`[${session.clientId}] ✓ MAC spoofing and game event logging active`);
-        }
-      }
-    }
-
-    // Log first few packets and then periodically
-    if (session.serverPackets <= 10 || session.serverPackets % 50 === 0) {
-      logger.info(
-        `[${session.clientId}] Server → Client: ${msg.length} bytes (pkt #${session.serverPackets})`
-      );
-    }
-
-    // Log detailed format info for first few server packets
-    if (session.serverPackets <= 5) {
-      this.logENetDiagnostic(session, msg, "S→C");
-    }
-
-    // Inspect/modify server-to-client traffic (OnSendToServer, etc.)
-    const modified = this.inspectServerDatagram(session, msg);
-
-    // Relay back to the game client via the CLIENT socket (port 17091)
-    this.clientSocket.send(
-      modified, 0, modified.length,
-      session.clientPort, session.clientAddr,
-      (err) => {
-        if (err && err.code !== "ERR_SOCKET_DGRAM_NOT_RUNNING") {
-          logger.error(`[${session.clientId}] Failed to send to client: ${err.message}`);
-        }
-      }
-    );
-  }
-
-  /**
-   * Create a new session for a client.
-   */
-  createSession(clientKey, rinfo) {
+  onClientConnect(netID) {
     const clientId = crypto.randomBytes(6).toString("hex");
 
     // Determine target server: pending redirect → login response → static config
@@ -306,120 +151,44 @@ class GrowtopiaProxy {
       serverPort = config.serverConfig.port;
     }
 
-    const session = {
+    // Clean up any previous session
+    if (this.session) {
+      if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
+      if (this.session.serverNetID !== null) {
+        try {
+          const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+          peer.reset(this.outgoingClient.host);
+        } catch (e) {}
+      }
+    }
+
+    this.session = {
       clientId,
-      clientAddr: rinfo.address,
-      clientPort: rinfo.port,
+      clientNetID: netID,
+      serverNetID: null,
       serverHost,
       serverPort,
       lastActivity: Date.now(),
       clientPackets: 0,
       serverPackets: 0,
-      handshakeComplete: false,   // true after first data packet (not CONNECT/VERIFY_CONNECT)
-      loginReceived: false,       // true after client sends GT type-2 login
+      handshakeComplete: false,
+      loginReceived: false,
+      connected: false,         // true when outgoing ENet connection is established
+      pendingClientData: [],    // buffer client data until outgoing is connected
+      noResponseTimer: null,
     };
 
-    this.sessions.set(clientKey, session);
-    logger.info(`[${clientId}] New session: ${clientKey} → ${serverHost}:${serverPort}`);
+    logger.info(`[${clientId}] Game client connected (netID=${netID}) → ${serverHost}:${serverPort}`);
     gameLog.logConnection(clientId, `${serverHost}:${serverPort}`);
 
-    // Info maintenance (not a warning — server may still accept connections)
     if (this.loginServer && this.loginServer.maintenanceDetected) {
       logger.info(`[${clientId}] Note: server_data had #maint flag`);
     }
 
-    // Warn if GT server never responds after 15 seconds
-    session.noResponseTimer = setTimeout(() => {
-      if (!this.sessions.has(clientKey)) return; // session already cleaned up
-      if (!session.serverPackets) {
-        logger.error(
-          `[${clientId}] ✗ ENet handshake FAILED — GT server ${serverHost}:${serverPort} did not respond`
-        );
-        logger.error(
-          `[${clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
-        );
-        if (this.loginServer && this.loginServer.maintenanceDetected) {
-          logger.info(
-            `[${clientId}] Note: server_data had #maint flag (server may still accept connections)`
-          );
-        }
-        logger.warn(
-          `[${clientId}] MAC spoofing + game event logs only work AFTER handshake succeeds`
-        );
-        logger.error(
-          `[${clientId}] ✗ Run dqymon-diagnose.exe relay test to check if your machine can relay UDP`
-        );
-        gameLog.logConnectionFail(
-          clientId,
-          `${serverHost}:${serverPort}`,
-          `No response after 15s (sent ${session.clientPackets} pkts)`
-        );
-      }
-    }, 15000);
-  }
-
-  /**
-   * Detect if a raw UDP datagram is an ENet CONNECT packet.
-   * GT CONNECT packets are typically 44 bytes with a CONNECT command (type 2)
-   * at offset 4 (hidden sentTime, no checksum).
-   */
-  isENetConnect(buf) {
-    if (buf.length < 8) return false;
-    const parsed = ENetParser.parseDatagram(buf);
-    if (!parsed || parsed.commands.length === 0) return false;
-    return parsed.commands[0].cmdType === ENetParser.CMD.CONNECT;
-  }
-
-  /**
-   * Reset an existing session when the client sends a new CONNECT.
-   * This happens when:
-   *  - Maintenance ended and the game retries
-   *  - The game cancels and reconnects
-   *  - Sub-server redirect
-   *
-   * Updates the target server to the latest from loginServer,
-   * resets counters and state, and regenerates spoof identity.
-   */
-  resetSession(clientKey, session) {
-    // Determine new target server
-    let newHost, newPort;
-    if (this.pendingServerQueue.length > 0) {
-      const pending = this.pendingServerQueue.shift();
-      newHost = pending.host;
-      newPort = pending.port;
-    } else if (this.loginServer && this.loginServer.realServerHost) {
-      newHost = this.loginServer.realServerHost;
-      newPort = this.loginServer.realServerPort;
-    } else {
-      newHost = session.serverHost;
-      newPort = session.serverPort;
-    }
-
-    const serverChanged = newHost !== session.serverHost || newPort !== session.serverPort;
-
-    // Clear old no-response timer
-    if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
-
-    // Log the reset
-    if (serverChanged) {
-      logger.info(`[${session.clientId}] Session reset: ${session.serverHost}:${session.serverPort} → ${newHost}:${newPort}`);
-    } else {
-      logger.info(`[${session.clientId}] Session reset (reconnection attempt to ${newHost}:${newPort})`);
-    }
-
-    // Update session state
-    session.serverHost = newHost;
-    session.serverPort = newPort;
-    session.clientPackets = 0;
-    session.serverPackets = 0;
-    session.handshakeComplete = false;
-    session.loginReceived = false;
-    session.lastActivity = Date.now();
-
     // Regenerate spoof identity for the new connection
     this.spoofState = this.generateSpoofState();
     if (this.spoofState.enabled) {
-      logger.info(`[${session.clientId}] ✓ New spoof identity: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
+      logger.info(`[${clientId}] ✓ New spoof identity: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
     }
 
     // Reset game event logger state
@@ -428,319 +197,157 @@ class GrowtopiaProxy {
     this.gameEventLogger.localNetID = -1;
     this.gameEventLogger.players.clear();
 
-    // New no-response timer
-    session.noResponseTimer = setTimeout(() => {
-      if (!this.sessions.has(clientKey)) return;
-      if (!session.serverPackets) {
+    // Ensure outgoing client exists, then connect to real GT server
+    this.ensureOutgoingClient();
+    this.outgoingClient.connect(serverHost, serverPort);
+    logger.info(`[${clientId}] Connecting to GT server ${serverHost}:${serverPort}...`);
+
+    // Warn if GT server never responds
+    this.session.noResponseTimer = setTimeout(() => {
+      if (this.session && !this.session.connected && this.session.clientId === clientId) {
         logger.error(
-          `[${session.clientId}] ✗ ENet handshake FAILED — GT server ${newHost}:${newPort} did not respond`
-        );
-        logger.error(
-          `[${session.clientId}] ✗ Client sent ${session.clientPackets} CONNECT packets, received 0 replies`
+          `[${clientId}] ✗ ENet handshake with GT server FAILED — ${serverHost}:${serverPort} did not respond`
         );
         if (this.loginServer && this.loginServer.maintenanceDetected) {
-          logger.info(`[${session.clientId}] Note: server_data had #maint flag (server may still accept connections)`);
+          logger.info(`[${clientId}] Note: server_data had #maint flag (server may still accept connections)`);
         }
         gameLog.logConnectionFail(
-          session.clientId,
-          `${newHost}:${newPort}`,
-          `No response after 15s (sent ${session.clientPackets} pkts)`
+          clientId, `${serverHost}:${serverPort}`, "No response after 15s"
         );
       }
     }, 15000);
-
-    gameLog.logConnection(session.clientId, `${newHost}:${newPort}`);
-  }
-
-  // ── Reachability Testing ─────────────────────────────────────────
-
-  /**
-   * MIRROR TEST: Send the exact same raw bytes from a completely fresh
-   * ephemeral socket. This eliminates ALL proxy-specific variables
-   * (port, socket config, firewall rules) and tells us definitively
-   * whether the GT server is accepting ENet connections RIGHT NOW.
-   *
-   * - If mirror gets response but relay doesn't → proxy socket issue
-   * - If NEITHER gets response → GT server is down/unreachable
-   * - If BOTH get response → everything works (shouldn't happen if relay failed)
-   */
-  mirrorTest(session, rawPacket) {
-    logger.info(`[MIRROR] Starting reachability test for ${session.serverHost}:${session.serverPort}`);
-
-    const testSocket = dgram.createSocket("udp4");
-    let responded = false;
-
-    testSocket.on("message", (msg, rinfo) => {
-      responded = true;
-      logger.info(`[MIRROR] ✓✓✓ GT server RESPONDED! from ${rinfo.address}:${rinfo.port} (${msg.length}b)`);
-      logger.info(`[MIRROR] ✓ Server IS accepting ENet connections right now`);
-      logger.info(`[MIRROR] ✓ If the main relay isn't working, it's a port/firewall issue`);
-
-      const hex = msg.slice(0, Math.min(msg.length, 32)).toString("hex").match(/.{1,2}/g).join(" ");
-      logger.info(`[MIRROR] Response hex: ${hex}`);
-
-      gameLog.logEvent("MIRROR TEST: Server responded! Server is UP.");
-      try { testSocket.close(); } catch {}
-    });
-
-    testSocket.on("error", (err) => {
-      logger.warn(`[MIRROR] Test socket error: ${err.message}`);
-    });
-
-    // Send the EXACT same raw bytes the game client sent
-    testSocket.send(rawPacket, session.serverPort, session.serverHost, (err) => {
-      if (err) {
-        logger.warn(`[MIRROR] Send failed: ${err.message}`);
-        return;
-      }
-      try {
-        const addr = testSocket.address();
-        logger.info(`[MIRROR] Sent ${rawPacket.length}b to ${session.serverHost}:${session.serverPort} from :${addr.port}`);
-      } catch (e) {
-        logger.info(`[MIRROR] Sent ${rawPacket.length}b`);
-      }
-    });
-
-    // Wait 10 seconds for response
-    setTimeout(() => {
-      if (!responded) {
-        logger.warn(`[MIRROR] ✗ No response from mirror test after 10s`);
-        logger.warn(`[MIRROR] ✗ Our crafted packet may not match GT's custom ENet format.`);
-        logger.warn(`[MIRROR] ✗ This does NOT prove the server is down.`);
-        logger.warn(`[MIRROR] ✗ Run dqymon-diagnose.exe relay test for a definitive answer.`);
-        gameLog.logEvent("MIRROR TEST: No response (crafted packet may not match GT format).");
-      }
-      try { testSocket.close(); } catch {}
-    }, 10000);
-  }
-
-  // ── ENet diagnostics ─────────────────────────────────────────────
-
-  /**
-   * CRC32 implementation matching ENet's polynomial (0xEDB88320).
-   */
-  static crc32(buf) {
-    let crc = 0xFFFFFFFF;
-    for (let i = 0; i < buf.length; i++) {
-      crc ^= buf[i];
-      for (let j = 0; j < 8; j++) {
-        crc = (crc & 1) ? ((crc >>> 1) ^ 0xEDB88320) : (crc >>> 1);
-      }
-    }
-    return (crc ^ 0xFFFFFFFF) >>> 0;
   }
 
   /**
-   * Parse and log detailed information about an ENet packet.
-   * Tries multiple header formats to detect GT's custom ENet variant.
-   * @param {object} session
-   * @param {Buffer} buf
-   * @param {string} direction - "C→S" or "S→C"
+   * Outgoing client connected to real GT server.
    */
-  logENetDiagnostic(session, buf, direction = "") {
-    const dirTag = direction ? ` ${direction}` : "";
-    const hex = buf.slice(0, Math.min(buf.length, 80)).toString("hex").match(/.{1,2}/g).join(" ");
-    logger.debug(`[${session.clientId}]${dirTag} Raw (${buf.length}b): ${hex}`);
+  onServerConnect(netID) {
+    if (!this.session) return;
 
-    if (buf.length < 4) return;
+    this.session.serverNetID = netID;
+    this.session.connected = true;
 
-    const peerIDField = buf.readUInt16BE(0);
-    const isCompressed = !!(peerIDField & 0x4000);
-
-    if (isCompressed) {
-      logger.debug(`[${session.clientId}]${dirTag} Compressed datagram — forwarded as-is`);
-      return;
+    if (this.session.noResponseTimer) {
+      clearTimeout(this.session.noResponseTimer);
+      this.session.noResponseTimer = null;
     }
 
-    // Use the scoring parser for consistent results
-    const parsed = ENetParser.parseDatagram(buf);
-    if (!parsed) {
-      logger.debug(`[${session.clientId}]${dirTag} Unknown ENet format — bytes forwarded as-is`);
-      this.scanForGTSignatures(session, buf, dirTag);
-      return;
-    }
-
-    const cmdNames = {
-      1: "ACK", 2: "CONNECT", 3: "VERIFY_CONNECT", 4: "DISCONNECT",
-      5: "PING", 6: "SEND_RELIABLE", 7: "SEND_UNRELIABLE", 8: "SEND_FRAGMENT",
-      9: "SEND_UNSEQUENCED", 10: "BW_LIMIT", 11: "THROTTLE", 12: "SEND_UNRELIABLE_FRAG",
-    };
-
-    const crcStr = parsed.hasChecksum ? "CRC32" : "no-CRC";
-    const stStr = parsed.hasSentTime ? "sentTime" : "no-ST";
-    const cmdSummary = parsed.commands
-      .map(c => cmdNames[c.cmdType] || `cmd${c.cmdType}`)
-      .join("+");
-
-    logger.debug(
-      `[${session.clientId}]${dirTag} Parse: hdr=${parsed.headerSize}b [${stStr},${crcStr}] ` +
-      `cmds=${cmdSummary} (score=${parsed.score})`
+    logger.info(
+      `[${this.session.clientId}] ✓ Connected to GT server ${this.session.serverHost}:${this.session.serverPort} (netID=${netID})`
+    );
+    gameLog.logConnectionSuccess(
+      this.session.clientId,
+      `${this.session.serverHost}:${this.session.serverPort}`
     );
 
-    // Only extract GT payload from data-carrying commands (not CONNECT/ACK/etc.)
-    for (const cmd of parsed.commands) {
-      if (cmd.dataLen >= 4 && (
-        cmd.cmdType === ENetParser.CMD.SEND_RELIABLE ||
-        cmd.cmdType === ENetParser.CMD.SEND_UNRELIABLE
-      )) {
-        const gtType = buf.readUInt32LE(cmd.dataStart);
-        const gtName = { 1: "HELLO", 2: "LOGIN", 3: "TEXT", 4: "TANK" }[gtType] || "?";
-        logger.info(
-          `[${session.clientId}]${dirTag} GT payload: type=${gtType} (${gtName}) len=${cmd.dataLen}b`
-        );
+    // Flush any client data that arrived before outgoing was ready
+    for (const { ch, data } of this.session.pendingClientData) {
+      this.outgoingClient.send(netID, ch, data);
+    }
+    this.session.pendingClientData = [];
+  }
 
-        // Dump first 120 chars of text for types 2 and 3
-        if ((gtType === 2 || gtType === 3) && cmd.dataStart + 4 < buf.length) {
-          const textPart = buf.toString("utf8", cmd.dataStart + 4, Math.min(buf.length, cmd.dataStart + 4 + 120));
-          logger.debug(`[${session.clientId}]${dirTag} Text: ${textPart.replace(/[\r\n]/g, "\\n").substring(0, 120)}`);
-        }
-      }
+  /**
+   * Game client sent a GT payload → inspect/modify → forward to GT server.
+   */
+  onClientData(netID, ch, data) {
+    if (!this.session || this.session.clientNetID !== netID) return;
+
+    this.session.lastActivity = Date.now();
+    this.session.clientPackets++;
+    this.totalClientPackets++;
+    gameLog.logPacketSent();
+
+    // Log first few packets and then periodically
+    if (this.session.clientPackets <= 10 || this.session.clientPackets % 50 === 0) {
+      const type = data.length >= 4 ? data.readUInt32LE(0) : -1;
+      const typeName = { 1: "HELLO", 2: "LOGIN", 3: "TEXT", 4: "TANK" }[type] || "?";
+      logger.info(
+        `[${this.session.clientId}] Client → Server: type=${type}(${typeName}) ${data.length}b ch=${ch} (pkt #${this.session.clientPackets})`
+      );
     }
 
-    // ── Scan for GT packet signatures in raw bytes ────────────────
-    // Even if we can't parse the ENet header, look for known GT
-    // payload patterns anywhere in the packet to help reverse-engineer
-    // the format. Only log for first 3 packets to avoid spam.
-    if ((session.clientPackets || 0) + (session.serverPackets || 0) <= 6) {
-      this.scanForGTSignatures(session, buf, dirTag);
+    // Inspect and possibly modify GT payload (MAC spoofing, command detection)
+    const modified = this.handleClientPayload(this.session, data);
+
+    // Forward to GT server
+    if (this.session.connected && this.session.serverNetID !== null) {
+      this.outgoingClient.send(this.session.serverNetID, ch, modified);
+    } else {
+      // Buffer until outgoing connection is established
+      this.session.pendingClientData.push({ ch, data: modified });
     }
   }
 
   /**
-   * Scan raw bytes for known Growtopia payload signatures.
-   * This works regardless of the ENet header format — it looks for
-   * known byte patterns in the raw UDP datagram to help us understand
-   * where the GT payload starts.
+   * GT server sent a GT payload → inspect/modify → forward to game client.
    */
-  scanForGTSignatures(session, buf, dirTag) {
-    // Look for known text patterns that appear in GT login/text packets
-    const signatures = [
-      { pattern: "tankIDName", desc: "LOGIN" },
-      { pattern: "requestedName", desc: "LOGIN" },
-      { pattern: "action|", desc: "ACTION" },
-      { pattern: "OnSendToServer", desc: "REDIRECT" },
-      { pattern: "OnConsoleMessage", desc: "CONSOLE" },
-      { pattern: "OnSpawn", desc: "SPAWN" },
-    ];
+  onServerData(netID, ch, data) {
+    if (!this.session) return;
 
-    const text = buf.toString("utf8", 0, Math.min(buf.length, 4096));
-    for (const sig of signatures) {
-      const idx = text.indexOf(sig.pattern);
-      if (idx !== -1) {
-        logger.info(
-          `[${session.clientId}]${dirTag} ✓ Found "${sig.pattern}" at offset ${idx} (${sig.desc})`
-        );
-        // Check for GT type header (uint32LE) 4 bytes before the text
-        if (idx >= 4) {
-          const possibleType = buf.readUInt32LE(idx - 4);
-          if (possibleType >= 1 && possibleType <= 10) {
-            logger.info(
-              `[${session.clientId}]${dirTag} ✓ GT type=${possibleType} at offset ${idx - 4} — ` +
-              `ENet payload likely starts at offset ${idx - 4}`
-            );
-          }
-        }
-      }
+    this.session.lastActivity = Date.now();
+    this.session.serverPackets++;
+    this.totalServerPackets++;
+    gameLog.logPacketReceived();
+
+    // First server data = relay is working
+    if (this.session.serverPackets === 1) {
+      this.session.handshakeComplete = true;
+      logger.info(`[${this.session.clientId}] ✓ ENet relay active — game data flowing!`);
+      logger.info(`[${this.session.clientId}] ✓ MAC spoofing and game event logging active`);
     }
+
+    // Log first few packets and then periodically
+    if (this.session.serverPackets <= 10 || this.session.serverPackets % 50 === 0) {
+      const type = data.length >= 4 ? data.readUInt32LE(0) : -1;
+      const typeName = { 1: "HELLO", 2: "LOGIN", 3: "TEXT", 4: "TANK" }[type] || "?";
+      logger.info(
+        `[${this.session.clientId}] Server → Client: type=${type}(${typeName}) ${data.length}b ch=${ch} (pkt #${this.session.serverPackets})`
+      );
+    }
+
+    // Inspect and possibly modify GT payload (OnSendToServer redirect, etc.)
+    const modified = this.handleServerPayload(this.session, data);
+
+    // Forward to game client
+    this.serverClient.send(this.session.clientNetID, ch, modified);
   }
 
   /**
-   * Probe the GT server by sending a minimal ENet CONNECT-like packet
-   * from a separate socket to verify UDP reachability.
+   * Game client disconnected from our ENet server.
    */
-  probeServer(host, port) {
-    return new Promise((resolve) => {
-      const probe = dgram.createSocket("udp4");
-      let responded = false;
+  onClientDisconnect(netID) {
+    if (!this.session || this.session.clientNetID !== netID) return;
 
-      probe.on("message", () => {
-        responded = true;
-        logger.info(`[PROBE] ✓ GT server ${host}:${port} responded to UDP probe`);
-        probe.close();
-        resolve(true);
-      });
+    logger.info(
+      `[${this.session.clientId}] Game client disconnected ` +
+      `(${this.session.clientPackets} sent, ${this.session.serverPackets} received)`
+    );
 
-      probe.on("error", (err) => {
-        logger.warn(`[PROBE] Probe socket error: ${err.message}`);
-        if (!responded) resolve(false);
-      });
-
-      // Send a minimal ENet CONNECT (44 bytes: peerID + sentTime + CONNECT command)
-      const buf = Buffer.alloc(44);
-      buf.writeUInt16BE(0x8FFF, 0);  // peerID=0xFFF with sentTime flag
-      buf.writeUInt16BE(0, 2);        // sentTime=0
-      buf[4] = 0x82;                  // CONNECT | ACK flag
-      buf[5] = 0xFF;                  // channelID
-      buf.writeUInt16BE(1, 6);        // reliableSeqNum=1
-      // connect data (36 bytes) — MTU=1400
-      buf.writeUInt32BE(1400, 12);    // MTU
-      buf.writeUInt32BE(32768, 16);   // windowSize
-      buf.writeUInt32BE(2, 20);       // channelCount
-      // bytes 24-43: bandwidths, throttle, connectID = 0 (fine for probe)
-
-      probe.send(buf, port, host, (err) => {
-        if (err) {
-          logger.warn(`[PROBE] Failed to send probe to ${host}:${port}: ${err.message}`);
-          resolve(false);
-          return;
-        }
-        logger.info(`[PROBE] Sent UDP probe (44b) to ${host}:${port} — waiting 5s for response...`);
-      });
-
-      // Give it 5 seconds
-      setTimeout(() => {
-        if (!responded) {
-          logger.warn(`[PROBE] ✗ No UDP response from ${host}:${port} after 5s`);
-          logger.warn(`[PROBE] GT server did not respond to our crafted probe`);
-          logger.info(`[PROBE] This is normal — GT uses obfuscated ENet that rejects non-client packets`);
-          try { probe.close(); } catch (e) {}
-          resolve(false);
-        }
-      }, 5000);
-    });
-  }
-
-  // ── Datagram inspection ───────────────────────────────────────────
-
-  /**
-   * Inspect a client-to-server datagram for Growtopia commands.
-   * May MODIFY the datagram (e.g. MAC spoofing on login packets).
-   * Returns the (possibly modified) datagram buffer.
-   */
-  inspectClientDatagram(session, buf) {
-    try {
-      const payloads = ENetParser.extractPayloads(buf);
-      for (const { cmd, data } of payloads) {
-        const modified = this.handleClientPayload(session, data);
-        if (modified && modified !== data) {
-          // Replace this payload in the ENet datagram
-          return ENetParser.replacePayload(buf, cmd, modified);
-        }
-      }
-    } catch (e) {
-      // Parsing failed — just relay unmodified
+    // Disconnect from GT server too
+    if (this.session.serverNetID !== null) {
+      try {
+        const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+        peer.reset(this.outgoingClient.host);
+      } catch (e) {}
     }
-    return buf;
+
+    if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
+    this.commandHandler.clearUserState(this.session.clientId);
+    this.session = null;
   }
 
   /**
-   * Inspect a server-to-client datagram for OnSendToServer redirects.
-   * Returns the (possibly modified) datagram buffer.
+   * Outgoing client disconnected from GT server.
    */
-  inspectServerDatagram(session, buf) {
-    try {
-      const payloads = ENetParser.extractPayloads(buf);
-      for (const { cmd, data } of payloads) {
-        const modified = this.handleServerPayload(session, data);
-        if (modified && modified !== data) {
-          // Replace this payload in the ENet datagram
-          return ENetParser.replacePayload(buf, cmd, modified);
-        }
-      }
-    } catch (e) {
-      // Parsing failed — relay unmodified
-    }
-    return buf;
+  onServerDisconnect(netID) {
+    if (!this.session) return;
+
+    logger.info(`[${this.session.clientId}] GT server disconnected (netID=${netID})`);
+
+    // Don't disconnect the game client — it may reconnect for sub-server redirect
+    this.session.connected = false;
+    this.session.serverNetID = null;
   }
 
   // ── Growtopia-level payload handlers ──────────────────────────────
@@ -952,42 +559,51 @@ class GrowtopiaProxy {
 
   /**
    * Send a Growtopia-level packet to a client.
-   * NOTE: With raw UDP relay, we cannot inject ENet-framed packets
-   * because we don't track ENet protocol state (peer IDs, sequence
-   * numbers). This is a no-op for now; features that need injection
-   * (command feedback, status overlay) log to the proxy console instead.
+   * With the ENet bridge, we can inject packets directly into the
+   * game client's ENet connection.
    */
   sendToClient(clientId, data) {
-    // Cannot inject without ENet state tracking — log intent instead
-    logger.debug(`[${clientId}] sendToClient skipped (raw UDP mode, ${data.length} bytes)`);
+    if (!this.session || this.session.clientId !== clientId) {
+      logger.debug(`[${clientId}] sendToClient: no matching session`);
+      return;
+    }
+    try {
+      this.serverClient.send(this.session.clientNetID, 0, data);
+    } catch (e) {
+      logger.error(`[${clientId}] sendToClient failed: ${e.message}`);
+    }
   }
 
-  cleanup(clientKey) {
-    const session = this.sessions.get(clientKey);
-    if (!session) return;
+  cleanup() {
+    if (!this.session) return;
 
-    if (session.noResponseTimer) clearTimeout(session.noResponseTimer);
+    if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
 
-    this.sessions.delete(clientKey);
-    this.commandHandler.clearUserState(session.clientId);
+    // Disconnect both peers
+    if (this.session.serverNetID !== null) {
+      try {
+        const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+        peer.reset(this.outgoingClient.host);
+      } catch (e) {}
+    }
+    if (this.session.clientNetID !== null) {
+      try {
+        const peer = this.serverClient.host.getPeer(this.session.clientNetID);
+        peer.reset(this.serverClient.host);
+      } catch (e) {}
+    }
 
-    logger.info(`[${session.clientId}] Session cleaned up (${session.clientPackets} sent, ${session.serverPackets} received)`);
+    this.commandHandler.clearUserState(this.session.clientId);
+    logger.info(`[${this.session.clientId}] Session cleaned up (${this.session.clientPackets} sent, ${this.session.serverPackets} received)`);
+    this.session = null;
   }
 
   cleanupStaleSessions() {
-    const now = Date.now();
-    for (const [key, session] of this.sessions) {
-      if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
-        logger.info(`[${session.clientId}] Session timed out`);
-        this.cleanup(key);
-      }
-    }
+    // No-op: with ENet bridge, connections are managed by the library
   }
 
   getSession(clientId) {
-    for (const session of this.sessions.values()) {
-      if (session.clientId === clientId) return session;
-    }
+    if (this.session && this.session.clientId === clientId) return this.session;
     return null;
   }
 }
@@ -1009,15 +625,12 @@ Logger.section("Initializing");
 proxy.loginServer = loginServer;
 loginServer.gameLog = gameLog;
 
-// When a new login (server_data) is served, clear stale sessions.
+// When a new login (server_data) is served, clear the current session.
 // The game client may reconnect from the same or a different port.
 loginServer.onNewLogin = (host, port) => {
-  for (const [key, session] of proxy.sessions) {
-    // Only clear sessions that haven't completed handshake or target a different server
-    if (!session.handshakeComplete || session.serverHost !== host || session.serverPort !== port) {
-      logger.info(`[${session.clientId}] Clearing stale session (new login → ${host}:${port})`);
-      proxy.cleanup(key);
-    }
+  if (proxy.session) {
+    logger.info(`[${proxy.session.clientId}] Clearing session (new login → ${host}:${port})`);
+    proxy.cleanup();
   }
 };
 
@@ -1031,7 +644,7 @@ process.on("exit", cleanup);
 process.on("SIGINT", () => { cleanup(); process.exit(); });
 process.on("SIGTERM", () => { cleanup(); process.exit(); });
 
-// 1. Start the raw UDP proxy
+// 1. Start the ENet proxy bridge
 proxy.start();
 
 // 2. Start the fake login server (serves server_data.php → proxy)

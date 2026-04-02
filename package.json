@@ -7,13 +7,14 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "build": "pkg . --targets node18-win-x64 --output dist/dqymon-proxy.exe",
+    "build": "pkg . --targets node18-win-x64 --output dist/dqymon-proxy.exe && cp node_modules/growtopia.js/growtopia-js.win32-x64-msvc.node dist/",
     "build:diagnose": "pkg diagnose.js --targets node18-win-x64 --output dist/dqymon-diagnose.exe",
-    "build:all": "pkg . --targets node18-win-x64,node18-linux-x64,node18-macos-x64 --out-path dist"
+    "build:all": "npm run build && npm run build:diagnose"
   },
   "pkg": {
     "assets": [
-      "config/**/*"
+      "config/**/*",
+      "node_modules/growtopia.js/growtopia-js.win32-x64-msvc.node"
     ],
     "outputPath": "dist"
   },
@@ -24,10 +25,14 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.0.3",
+    "growtopia.js": "^2.2.0"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.14.2",
     "nodemon": "^3.1.14"
+  },
+  "optionalDependencies": {
+    "growtopia.js-win32-x64-msvc": "^2.2.0"
   }
 }
