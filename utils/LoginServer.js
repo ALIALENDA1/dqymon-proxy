@@ -372,6 +372,7 @@ class LoginServer {
       const chunks = [];
       resp.on("data", (c) => chunks.push(c));
       resp.on("end", () => {
+        if (origRes.destroyed) return;
         const respBody = Buffer.concat(chunks);
         this.logger.info(`[LOGIN] Proxied ${sanitizeUrl(origReq.url)} → ${resp.statusCode} (${respBody.length}b)`);
         if (resp.statusCode >= 400) {
@@ -388,15 +389,19 @@ class LoginServer {
 
     proxyReq.on("error", (err) => {
       this.logger.warn(`[LOGIN] Proxy raw error: ${err.message}`);
-      origRes.writeHead(502, { "Content-Type": "text/plain" });
-      origRes.end("Proxy error");
+      if (!origRes.destroyed && !origRes.headersSent) {
+        origRes.writeHead(502, { "Content-Type": "text/plain" });
+        origRes.end("Proxy error");
+      }
     });
 
     proxyReq.on("timeout", () => {
       this.logger.warn(`[LOGIN] Proxy raw timeout for ${sanitizeUrl(origReq.url)}`);
       proxyReq.destroy();
-      origRes.writeHead(504, { "Content-Type": "text/plain" });
-      origRes.end("Timeout");
+      if (!origRes.destroyed && !origRes.headersSent) {
+        origRes.writeHead(504, { "Content-Type": "text/plain" });
+        origRes.end("Timeout");
+      }
     });
 
     if (body) proxyReq.write(body);
@@ -412,8 +417,10 @@ class LoginServer {
 
     // ── Rate limiting ──────────────────────────────────────────────
     if (!this.checkRateLimit(clientIp)) {
-      res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "60" });
-      res.end("Too many requests");
+      if (!res.destroyed) {
+        res.writeHead(429, { "Content-Type": "text/plain", "Retry-After": "60" });
+        res.end("Too many requests");
+      }
       return;
     }
 
@@ -421,8 +428,10 @@ class LoginServer {
     const reqHost = (req.headers.host || "").split(":")[0].toLowerCase();
     if (reqHost && !ALLOWED_HOSTS.has(reqHost) && reqHost !== "127.0.0.1" && reqHost !== "localhost") {
       this.logger.warn(`[LOGIN] Rejected request for unknown host: ${reqHost}`);
-      res.writeHead(403, { "Content-Type": "text/plain" });
-      res.end("Forbidden");
+      if (!res.destroyed) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Forbidden");
+      }
       return;
     }
 
@@ -434,11 +443,15 @@ class LoginServer {
     req.on("data", (chunk) => {
       bodySize += chunk.length;
       if (bodySize > MAX_BODY_SIZE) {
-        aborted = true;
-        this.logger.warn(`[LOGIN] Request body too large (${bodySize}b) from ${clientIp}`);
-        res.writeHead(413, { "Content-Type": "text/plain" });
-        res.end("Request too large");
-        req.destroy();
+        if (!aborted) {
+          aborted = true;
+          this.logger.warn(`[LOGIN] Request body too large (${bodySize}b) from ${clientIp}`);
+          if (!res.destroyed) {
+            res.writeHead(413, { "Content-Type": "text/plain" });
+            res.end("Request too large");
+          }
+          req.destroy();
+        }
         return;
       }
       chunks.push(chunk);
@@ -470,6 +483,7 @@ class LoginServer {
 
       this.fetchAndModifyServerData(postBody, req.headers.host)
         .then((data) => {
+          if (res.destroyed) return;
           res.writeHead(200, {
             "Content-Type": "text/html",
             "Content-Length": Buffer.byteLength(data),
@@ -486,6 +500,7 @@ class LoginServer {
           if (this.gameLog) {
             this.gameLog.logLogin(false, `Error: ${err.message}`);
           }
+          if (res.destroyed) return;
           const fallback = this.getFallbackServerData();
           res.writeHead(200, {
             "Content-Type": "text/html",
@@ -496,10 +511,12 @@ class LoginServer {
     });
 
     req.on("error", () => {
-      if (!res.headersSent) {
-        const fallback = this.getFallbackServerData();
-        res.writeHead(200);
-        res.end(fallback);
+      if (!res.destroyed && !res.headersSent) {
+        try {
+          const fallback = this.getFallbackServerData();
+          res.writeHead(200);
+          res.end(fallback);
+        } catch {}
       }
     });
   }

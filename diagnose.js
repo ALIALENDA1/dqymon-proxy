@@ -393,14 +393,69 @@ function testENetConnection(serverIP, serverPort) {
 
 // ── Step 6: RELAY TEST ──────────────────────────────────────────────
 // This is the CRITICAL test. It does exactly what the proxy does:
-//   - Listen on port 17091
+//   - Start an HTTPS server on port 443 to serve modified server_data
+//   - Listen on UDP port 17091 for ENet packets
+//   - Install our cert so GT trusts our HTTPS server
 //   - Redirect GT domains to 127.0.0.1 via hosts file
-//   - Wait for the real GT client to send its first ENet packet
-//   - Relay that EXACT packet to the real server from a DIFFERENT socket
+//   - Wait for the real GT client to complete login + send ENet
+//   - Relay the EXACT ENet bytes to the real GT server
 //   - See if we get a response
 //
-// If this works -> the proxy's relay mechanism CAN work
-// If this fails -> something on this machine prevents UDP relay
+// If relay gets a response -> the proxy's mechanism works
+// If relay fails -> something on this machine prevents UDP relay
+
+// Embedded self-signed cert (same as proxy's LoginServer)
+const EMBEDDED_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCsBU9euV5ir6DA
+50Q9lrr83fDUqRSJIaDw2ydz5pMpToS8ZZMhvCjEo3Y1zfy2ZQY5hphMjqHL49Xe
+vewWqgGMRs6mIL8ZL6HjoteL8Fhe2uvSoJS5AKSTElmyYzPyr5H66Z+/Tur6TMzG
+ezh+ePWaP94x5mOHgmUIMyJ61N41ZEQALiDdoCFbZCpjjl498NIi30uRJH+mRF60
+vGGpZl7kqgeJJUW6lGcRm4EN8KI6Uaa13a4dWRf05MBBWa/v9qEcgLdL3DazCrI6
+QKooOc+B80UWjqsC7HSs93eWP9+7J5OXYObZHSA0VitqexWcPX12Hdge4WmE3kvN
+hcReXR4DAgMBAAECggEAAZ6EEL5qYz/c2p6oAHOFbxE9FN/QyMfi6++yYu3KeGH0
+0zvTT5w0BglgTiTnj54ufUM+L0+hSAhCUjgz4nueS6rX2OaydATnpolVbEvKbLaY
+KMi6K+AT5WPW1E4labNkfGEIXiLas2Bz6XF77cMOmv/CdeQBug2zt4juWifcIWD1
+K9PDf/d5MulFwWMjrbsiOQGHFu0a55Xui6eF+cr4bCt6nDfVkgmF3l4n5Y8HW0rl
+ixVSrn857TwEkXXk4uWxxnrXZhnjXk4aI5c7AIjG5MyDn0Y4nK9lRqkaCX3aga9V
+gnm2m+lRrxjZhU+gR/kLOOVaqqmu/qVWmV1ihl5DgQKBgQDVmbuuqpDUOJH/rV5M
+e3HYFyK2ZW9pfunbD2cdErVGIrWZshCxkCcVR+P3VQhxG/JtG5cYTdCNLY8Kuo/l
+Dk89Bpf0pUHybWczHXu2VkMS1xhBql0I7COjEoQnqICWUatlmfb/0gFfMrP3G4VH
+Dsp3cAxpabOkjqcMJKpZYPASLwKBgQDOKquIQmzhio5iyKEOcpLqT4dsxl6/XZmh
+PERcY2TtN9oB4puVO8WFG2mwBPj2+sM2Yh+skj71vvdEOKvcoMRwAHFjFvHReKvL
+37SRbYlrC4/08Jfb5zI9wL+/uoTSFnY+NRFKgN4K+k+wRrzke4/yCYSE1U9jEqpf
+69CU9bigbQKBgQDOd09HQm/D8vqM3ZOs8hXU/mf7TokmvBpoOLc/DvpR1PMcoVYp
+jGF63IaqaHNEgfMPLAAc6fqQvFzrzfGRQweswVbYj3TzVHTQn8sZMMCc0XUM5BQR
+r8+yrQ85FlNU+ZRnHS/3j5Lr5iK21M87JDzovlIBAr82bP1ja32N73me2QKBgQCM
++4DxXPs4AJf91VTNnGv67wecyspf8pHsQFo/E3kg/uCGCYB7PLSFoYlUZRIbUr/L
+oK4oRJnpUv2kGVztMsMiFCt1p2sV438Xm5LPICiomu+GgEBYkHE66WQ2qEXLpLCX
+OZLpb9Zni2STFsx1MkntKbUFYRk4lrsLfSbVtnLawQKBgHoqZtldrYkG4JvGAtIr
+Xn7o/Jj1vj6iAs0DdeEo7fh1QV270DTX13GNboJopX14y0v2tiEpQDG/L1PWLEv/
+tPdYELdQU5DrY+AZOawKhIFysBkoUY1eDaN0ZQVroe1XtLqhR246/AzZaF8I++vD
+A4+IkFrMozsmwwoS4fMu2+lw
+-----END PRIVATE KEY-----`;
+
+const EMBEDDED_CERT = `-----BEGIN CERTIFICATE-----
+MIIDjzCCAnegAwIBAgIUaMMGZu0yM5WbLko1WEzYvqkLKoQwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSd3d3Lmdyb3d0b3BpYTEuY29tMB4XDTI2MDQwMTExMzE1
+N1oXDTM2MDMyOTExMzE1N1owHTEbMBkGA1UEAwwSd3d3Lmdyb3d0b3BpYTEuY29t
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArAVPXrleYq+gwOdEPZa6
+/N3w1KkUiSGg8Nsnc+aTKU6EvGWTIbwoxKN2Nc38tmUGOYaYTI6hy+PV3r3sFqoB
+jEbOpiC/GS+h46LXi/BYXtrr0qCUuQCkkxJZsmMz8q+R+umfv07q+kzMxns4fnj1
+mj/eMeZjh4JlCDMietTeNWREAC4g3aAhW2QqY45ePfDSIt9LkSR/pkRetLxhqWZe
+5KoHiSVFupRnEZuBDfCiOlGmtd2uHVkX9OTAQVmv7/ahHIC3S9w2swqyOkCqKDnP
+gfNFFo6rAux0rPd3lj/fuyeTl2Dm2R0gNFYransVnD19dh3YHuFphN5LzYXEXl0e
+AwIDAQABo4HGMIHDMB0GA1UdDgQWBBQUn7yvYjjPnYYKnKpxTTccQg4O5zAfBgNV
+HSMEGDAWgBQUn7yvYjjPnYYKnKpxTTccQg4O5zAPBgNVHRMBAf8EBTADAQH/MHAG
+A1UdEQRpMGeCEnd3dy5ncm93dG9waWExLmNvbYISd3d3Lmdyb3d0b3BpYTIuY29t
+ghdsb2dpbi5ncm93dG9waWFnYW1lLmNvbYIOZ3Jvd3RvcGlhMS5jb22CDmdyb3d0
+b3BpYTIuY29thwR/AAABMA0GCSqGSIb3DQEBCwUAA4IBAQCUV5eaFt9FSM94fUio
+/IrNAZmG8NhFR6+AsGWoiW/H//ETlqQ4MUAJqy6rwivbwOJdXEgKUwse66fHGn9W
+lKUAr+AWRAnumwzD16EcOzbPIzShVegwvaTr9w9yhanM3Q64cid9j0rajYijKsL8
+nFYJam2zqrreo1dnU8XVHl7dAlmWzuryxFWr6CJUWVvKxE83nLqzmFeJUSFDh1g6
+/tscqUPlvhPzYAtpHyhOpW8H3Eax7TEYwGsjb4aSsJ1VXcBsi/yF2wh/bfBJSgPm
+l/ERC+VsRpSe1W0Wb2EXImGKeVu+bCKPESh1dG9jjSd5sF2HuJ0JH6WkNdP3CiCq
+Lqkk
+-----END CERTIFICATE-----`;
 
 function modifyHostsForRelay() {
   try {
@@ -428,46 +483,255 @@ function restoreHosts() {
   } catch {}
 }
 
-function relayTest(serverIP, serverPort) {
+function installCert() {
+  if (process.platform !== "win32") return false;
+  try {
+    const tmpCert = require("path").join(require("os").tmpdir(), "dqymon-diagnose-cert.crt");
+    fs.writeFileSync(tmpCert, EMBEDDED_CERT);
+    require("child_process").execSync(
+      `certutil -addstore -f Root "${tmpCert}" >nul 2>&1`,
+      { stdio: "pipe" }
+    );
+    try { fs.unlinkSync(tmpCert); } catch {}
+    ok("Certificate installed to Trusted Root store");
+    return true;
+  } catch (err) {
+    warn(`Could not install cert: ${err.message}`);
+    info("If GT shows SSL errors, install the cert manually.");
+    return false;
+  }
+}
+
+function removeCert() {
+  if (process.platform !== "win32") return;
+  try {
+    require("child_process").execSync(
+      'certutil -delstore Root "www.growtopia1.com" >nul 2>&1',
+      { stdio: "pipe" }
+    );
+  } catch {}
+}
+
+/**
+ * Start a minimal HTTPS server that serves modified server_data
+ * pointing the game to 127.0.0.1:17091 (our UDP listener).
+ */
+function startRelayHttpsServer(serverDataBody) {
+  return new Promise((resolve, reject) => {
+    const http = require("http");
+
+    // Modify server_data: point to our UDP listener at 127.0.0.1:17091
+    let modifiedBody = serverDataBody;
+    modifiedBody = modifiedBody.replace(/^server\|.+$/m, "server|127.0.0.1");
+    modifiedBody = modifiedBody.replace(/^port\|.+$/m, "port|17091");
+    // Force type2|1 (direct ENet connection, bypass web login)
+    if (/^type2\|/m.test(modifiedBody)) {
+      modifiedBody = modifiedBody.replace(/^type2\|.+$/m, "type2|1");
+    } else {
+      modifiedBody += "\ntype2|1";
+    }
+    // Strip problematic lines
+    modifiedBody = modifiedBody.replace(/^error\|.+$/gm, "");
+    modifiedBody = modifiedBody.replace(/^url\|.+$/gm, "");
+    modifiedBody = modifiedBody.replace(/^#maint\|.+$/gm, "");
+    modifiedBody = modifiedBody.replace(/\n{2,}/g, "\n").trim();
+    if (!modifiedBody.includes("RTENDMARKERBS1001")) {
+      modifiedBody += "\nRTENDMARKERBS1001";
+    }
+
+    dim("Modified server_data for relay test:");
+    for (const line of modifiedBody.split("\n")) {
+      if (line.trim()) dim(line.length > 100 ? line.substring(0, 100) + "..." : line);
+    }
+
+    // Handler for server_data requests
+    function handleRequest(req, res) {
+      if (req.method === "POST") {
+        const chunks = [];
+        let size = 0;
+        req.on("data", (c) => {
+          size += c.length;
+          if (size < 64 * 1024) chunks.push(c);
+        });
+        req.on("end", () => {
+          if (res.destroyed) return;
+          ok(`[HTTPS] ${req.method} ${req.url} from game client`);
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(modifiedBody);
+        });
+        req.on("error", () => {
+          if (!res.destroyed && !res.headersSent) {
+            try { res.writeHead(200); res.end(modifiedBody); } catch {}
+          }
+        });
+      } else {
+        ok(`[HTTPS] ${req.method} ${req.url} from game client`);
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end(modifiedBody);
+      }
+    }
+
+    const servers = [];
+
+    // HTTPS on 443
+    try {
+      const httpsServer = https.createServer(
+        { key: EMBEDDED_KEY, cert: EMBEDDED_CERT },
+        handleRequest
+      );
+      httpsServer.on("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+          fail("[HTTPS] Port 443 is already in use!");
+        } else {
+          fail(`[HTTPS] Error: ${err.message}`);
+        }
+      });
+      httpsServer.on("tlsClientError", () => {}); // suppress TLS handshake noise
+      httpsServer.listen(443, "0.0.0.0", () => {
+        ok("[HTTPS] Listening on port 443");
+      });
+      servers.push(httpsServer);
+    } catch (err) {
+      fail(`[HTTPS] Failed to create server: ${err.message}`);
+    }
+
+    // HTTP on 80 (GT tries this too)
+    try {
+      const httpServer = http.createServer(handleRequest);
+      httpServer.on("error", () => {}); // silently ignore
+      httpServer.listen(80, "0.0.0.0", () => {
+        ok("[HTTP] Listening on port 80");
+      });
+      servers.push(httpServer);
+    } catch {}
+
+    // HTTP on 8080 (alternate)
+    try {
+      const http8080 = http.createServer(handleRequest);
+      http8080.on("error", () => {});
+      http8080.listen(8080, "0.0.0.0", () => {});
+      servers.push(http8080);
+    } catch {}
+
+    // Give servers a moment to start
+    setTimeout(() => {
+      resolve({
+        servers,
+        close: () => {
+          for (const s of servers) {
+            try { s.close(); } catch {}
+          }
+        }
+      });
+    }, 500);
+  });
+}
+
+/**
+ * Find Growtopia executable on Windows.
+ */
+function findGrowtopia() {
+  if (process.platform !== "win32") return null;
+  const pathMod = require("path");
+  const local = process.env.LOCALAPPDATA || "";
+  const candidates = [
+    pathMod.join(local, "Growtopia", "Growtopia.exe"),
+    "C:\\Program Files\\Growtopia\\Growtopia.exe",
+    "C:\\Program Files (x86)\\Growtopia\\Growtopia.exe",
+    pathMod.join(require("os").homedir(), "Growtopia", "Growtopia.exe"),
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
+/**
+ * Launch Growtopia and return the child process (or null).
+ */
+function launchGrowtopia() {
+  const gamePath = findGrowtopia();
+  if (!gamePath) {
+    warn("Growtopia not found — please open it manually");
+    return null;
+  }
+  ok(`Found Growtopia: ${gamePath}`);
+  try {
+    const { spawn } = require("child_process");
+    const child = spawn(gamePath, [], {
+      detached: true,
+      stdio: "ignore",
+      cwd: require("path").dirname(gamePath),
+    });
+    child.unref();
+    child.on("error", () => {});
+    ok("Growtopia launched automatically!");
+    return child;
+  } catch (err) {
+    warn(`Failed to launch: ${err.message} — please open it manually`);
+    return null;
+  }
+}
+
+// Global cleanup state for signal handlers
+let _relayCleanup = null;
+
+async function relayTest(serverIP, serverPort, serverDataBody) {
+  header("Step 6: RELAY TEST (full login + ENet relay)");
+  info("This test does EXACTLY what the proxy does:");
+  info("  1. Redirect GT domains to 127.0.0.1 (hosts file)");
+  info("  2. Start HTTPS server on 443 to serve modified server_data");
+  info("  3. Install our cert so GT trusts the HTTPS server");
+  info("  4. Listen on UDP 17091 for the game's ENet packets");
+  info("  5. Relay EXACT bytes to the real GT server");
+  info("  6. Relay server responses back to the game");
+  console.log();
+
+  // Step A: Modify hosts
+  if (!modifyHostsForRelay()) {
+    warn("Skipping relay test (cannot modify hosts)");
+    return { skipped: true };
+  }
+  ok("Hosts file modified");
+
+  // Step B: Flush DNS
+  if (process.platform === "win32") {
+    try {
+      require("child_process").execSync("ipconfig /flushdns", { stdio: "pipe" });
+      ok("DNS cache flushed");
+    } catch {}
+  }
+
+  // Step C: Install cert
+  installCert();
+
+  // Step D: Start HTTPS server
+  const httpsServers = await startRelayHttpsServer(serverDataBody);
+  info("HTTPS login server ready");
+
+  // Step E: UDP sockets
+  const listenSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  const relaySocket = dgram.createSocket("udp4");
+
+  let clientAddr = null;
+  let clientPort = null;
+  let serverResponded = false;
+  let clientConnected = false;
+  let clientPackets = 0;
+  let serverPackets = 0;
+  let gameProcess = null;
+
+  // Register cleanup handler for Ctrl+C / unexpected exit
+  _relayCleanup = () => {
+    restoreHosts();
+    removeCert();
+    httpsServers.close();
+    try { listenSocket.close(); } catch {}
+    try { relaySocket.close(); } catch {}
+    _relayCleanup = null;
+  };
+
   return new Promise((resolve) => {
-    header("Step 6: RELAY TEST (captures + relays your real GT client's packet)");
-    info("This test will:");
-    info("  1. Temporarily redirect GT domains to 127.0.0.1");
-    info("  2. Listen on port 17091 (like the proxy does)");
-    info("  3. Wait for you to open Growtopia (30 seconds)");
-    info("  4. Capture the REAL ENet packet your client sends");
-    info("  5. Relay the EXACT bytes to the GT server from another socket");
-    info("  6. Check if the server responds");
-    console.log();
-
-    // Modify hosts
-    if (!modifyHostsForRelay()) {
-      warn("Skipping relay test (cannot modify hosts)");
-      resolve({ skipped: true });
-      return;
-    }
-    ok("Hosts file modified \u2014 GT domains \u2192 127.0.0.1");
-
-    // Flush DNS on Windows
-    if (process.platform === "win32") {
-      try {
-        require("child_process").execSync("ipconfig /flushdns", { stdio: "pipe" });
-        ok("DNS cache flushed");
-      } catch {}
-    }
-
-    // Socket 1: Listen for GT client on port 17091
-    const listenSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
-    // Socket 2: Relay to server from ephemeral port (exactly like the proxy)
-    const relaySocket = dgram.createSocket("udp4");
-
-    let clientAddr = null;
-    let clientPort = null;
-    let serverResponded = false;
-    let clientConnected = false;
-    let clientPackets = 0;
-    let serverPackets = 0;
-
     listenSocket.on("message", (msg, rinfo) => {
       clientPackets++;
 
@@ -476,37 +740,38 @@ function relayTest(serverIP, serverPort) {
         clientAddr = rinfo.address;
         clientPort = rinfo.port;
 
-        ok(`GT client connected! ${rinfo.address}:${rinfo.port}`);
+        ok(`GT client ENet connected! ${rinfo.address}:${rinfo.port}`);
         ok(`Captured real ENet packet: ${msg.length} bytes`);
         dim(`Hex: ${hexDump(msg, 64)}`);
 
-        // Verify CRC32 on client's packet to understand its format
-        const peerIDField = msg.readUInt16BE(0);
-        const hasSentTime = !!(peerIDField & 0x8000);
-        const isCompressed = !!(peerIDField & 0x4000);
-        info(`peerID=0x${peerIDField.toString(16)} sentTime=${hasSentTime} compressed=${isCompressed}`);
+        // Analyze the packet
+        if (msg.length >= 4) {
+          const peerIDField = msg.readUInt16BE(0);
+          const hasSentTime = !!(peerIDField & 0x8000);
+          const isCompressed = !!(peerIDField & 0x4000);
+          info(`peerID=0x${peerIDField.toString(16)} sentTime=${hasSentTime} compressed=${isCompressed}`);
 
-        const crcOffset = 2 + (hasSentTime ? 2 : 0);
-        if (crcOffset + 4 <= msg.length) {
-          const storedCrc = msg.readUInt32LE(crcOffset);
-          const testBuf = Buffer.from(msg);
-          testBuf.writeUInt32LE(0, crcOffset);
-          const computed = crc32(testBuf);
-          if (storedCrc === computed) {
-            ok(`CRC32 at offset ${crcOffset}: 0x${storedCrc.toString(16)} \u2713 VALID`);
-          } else {
-            warn(`CRC32 at offset ${crcOffset}: stored=0x${storedCrc.toString(16)} computed=0x${computed.toString(16)} (mismatch)`);
-            info("GT might use a different checksum algorithm or no checksum.");
+          const crcOffset = 2 + (hasSentTime ? 2 : 0);
+          if (crcOffset + 4 <= msg.length) {
+            const storedCrc = msg.readUInt32LE(crcOffset);
+            const testBuf = Buffer.from(msg);
+            testBuf.writeUInt32LE(0, crcOffset);
+            const computed = crc32(testBuf);
+            if (storedCrc === computed) {
+              ok(`CRC32 at offset ${crcOffset}: 0x${storedCrc.toString(16)} VALID`);
+            } else {
+              warn(`CRC32: stored=0x${storedCrc.toString(16)} computed=0x${computed.toString(16)}`);
+            }
           }
         }
 
         info(`Relaying to real server ${serverIP}:${serverPort}...`);
       }
 
-      // Relay EVERY client packet to the server (unchanged!)
+      // Relay EVERY client packet to the real server (unchanged)
       relaySocket.send(msg, 0, msg.length, serverPort, serverIP, (err) => {
         if (err) {
-          fail(`Relay to server failed: ${err.message}`);
+          fail(`Relay send failed: ${err.message}`);
         } else if (clientPackets <= 5) {
           try {
             const addr = relaySocket.address();
@@ -524,12 +789,12 @@ function relayTest(serverIP, serverPort) {
       if (!serverResponded) {
         serverResponded = true;
         console.log();
-        ok(`${GREEN}${BOLD}\u2713\u2713\u2713 GT SERVER RESPONDED TO RELAYED PACKET! \u2713\u2713\u2713${RESET}`);
+        ok(`${GREEN}${BOLD}SERVER RESPONDED TO RELAYED PACKET!${RESET}`);
         ok(`Response: ${msg.length}b from ${rinfo.address}:${rinfo.port}`);
         dim(`Hex: ${hexDump(msg, 64)}`);
       }
 
-      // Relay server response back to client
+      // Relay response back to game client
       if (clientAddr && clientPort) {
         listenSocket.send(msg, 0, msg.length, clientPort, clientAddr, () => {});
       }
@@ -537,11 +802,11 @@ function relayTest(serverIP, serverPort) {
 
     listenSocket.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
-        fail("Port 17091 is already in use! Close the proxy first.");
+        fail("Port 17091 already in use! Close the proxy first.");
       } else {
-        fail(`Listen socket error: ${err.message}`);
+        fail(`Listen error: ${err.message}`);
       }
-      restoreHosts();
+      if (_relayCleanup) { _relayCleanup(); }
       resolve({ skipped: true });
     });
 
@@ -550,20 +815,24 @@ function relayTest(serverIP, serverPort) {
     });
 
     listenSocket.bind(17091, "0.0.0.0", () => {
-      ok("Listening on port 17091");
+      ok("UDP listening on port 17091");
       console.log();
-      info(`${BOLD}${YELLOW}>>> NOW OPEN GROWTOPIA and wait for it to connect <<<${RESET}`);
-      info("You have 30 seconds...");
+
+      // Auto-launch Growtopia
+      gameProcess = launchGrowtopia();
+      if (!gameProcess) {
+        info(`${BOLD}${YELLOW}>>> PLEASE OPEN GROWTOPIA MANUALLY <<<${RESET}`);
+      }
+      info("The game will get server_data from our HTTPS server,");
+      info("then connect via ENet to port 17091. We relay to the real server.");
+      info("Waiting 45 seconds...");
       console.log();
     });
 
-    // 30 second timeout
-    const timeout = setTimeout(() => {
-      restoreHosts();
-      // Give a couple more seconds for any trailing responses
+    // 45 second timeout
+    setTimeout(() => {
+      if (_relayCleanup) { _relayCleanup(); }
       setTimeout(() => {
-        try { listenSocket.close(); } catch {}
-        try { relaySocket.close(); } catch {}
         resolve({
           skipped: false,
           clientConnected,
@@ -572,13 +841,7 @@ function relayTest(serverIP, serverPort) {
           serverPackets,
         });
       }, 2000);
-    }, 30000);
-
-    // If we do get a server response, extend the relay for 10 more seconds
-    // so the user can actually see the game connect
-    relaySocket.on("message", () => {
-      // first response already handled above
-    });
+    }, 45000);
   });
 }
 
@@ -686,7 +949,7 @@ async function main() {
 
   let relayResult = null;
   if (doRelay) {
-    relayResult = await relayTest(loginResult.ip, loginResult.port);
+    relayResult = await relayTest(loginResult.ip, loginResult.port, loginResult.rawBody);
   } else {
     info("Relay test skipped.");
     relayResult = { skipped: true };
@@ -697,8 +960,24 @@ async function main() {
 }
 
 main().catch(async (err) => {
+  if (_relayCleanup) { _relayCleanup(); }
   restoreHosts();
+  removeCert();
   console.error(`\n${RED}[FATAL] ${err.message}${RESET}\n${err.stack}`);
   await pause();
   process.exit(1);
+});
+
+// Ensure cleanup on unexpected exit
+process.on("SIGINT", () => {
+  if (_relayCleanup) { _relayCleanup(); }
+  restoreHosts();
+  removeCert();
+  process.exit();
+});
+process.on("SIGTERM", () => {
+  if (_relayCleanup) { _relayCleanup(); }
+  restoreHosts();
+  removeCert();
+  process.exit();
 });

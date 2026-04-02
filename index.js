@@ -80,6 +80,10 @@ class GrowtopiaProxy {
       logger.error(`Client socket error: ${err.message}`);
     });
 
+    this.clientSocket.on("close", () => {
+      logger.warn("Client socket closed unexpectedly");
+    });
+
     this.clientSocket.bind(config.proxy.port, config.proxy.host, () => {
       logger.info(
         `✓ Client socket on ${config.proxy.host}:${config.proxy.port} (game connects here)`
@@ -107,6 +111,22 @@ class GrowtopiaProxy {
 
     this.serverSocket.on("error", (err) => {
       logger.error(`Server socket error: ${err.message}`);
+    });
+
+    this.serverSocket.on("close", () => {
+      logger.warn("Server socket closed — attempting to recreate");
+      try {
+        this.serverSocket = dgram.createSocket("udp4");
+        this.serverSocket.on("message", (msg, rinfo) => {
+          const session = this.findSessionForServerResponse(rinfo);
+          if (session) this.handleServerMessage(session, msg, rinfo);
+        });
+        this.serverSocket.on("error", (err) => {
+          logger.error(`Recreated server socket error: ${err.message}`);
+        });
+      } catch (e) {
+        logger.error(`Failed to recreate server socket: ${e.message}`);
+      }
     });
 
     // Periodically clean up stale sessions
@@ -201,6 +221,7 @@ class GrowtopiaProxy {
     // is being blocked
     if (session.clientPackets === 1) {
       session.fallbackTimer = setTimeout(() => {
+        if (!this.sessions.has(`${rinfo.address}:${rinfo.port}`)) return;
         if (session.serverPackets === 0) {
           logger.warn(`[${session.clientId}] No response yet — trying fallback: send from clientSocket (port ${config.proxy.port})`);
           this.clientSocket.send(
@@ -226,6 +247,12 @@ class GrowtopiaProxy {
     session.lastActivity = Date.now();
     session.serverPackets = (session.serverPackets || 0) + 1;
     this.totalServerPackets++;
+
+    // Cancel the fallback timer on first server response
+    if (session.serverPackets === 1 && session.fallbackTimer) {
+      clearTimeout(session.fallbackTimer);
+      session.fallbackTimer = null;
+    }
 
     // First server response = connection established!
     if (session.serverPackets === 1) {
@@ -254,7 +281,7 @@ class GrowtopiaProxy {
       modified, 0, modified.length,
       session.clientPort, session.clientAddr,
       (err) => {
-        if (err) {
+        if (err && err.code !== "ERR_SOCKET_DGRAM_NOT_RUNNING") {
           logger.error(`[${session.clientId}] Failed to send to client: ${err.message}`);
         }
       }
@@ -303,6 +330,7 @@ class GrowtopiaProxy {
 
     // Warn if GT server never responds after 15 seconds
     session.noResponseTimer = setTimeout(() => {
+      if (!this.sessions.has(clientKey)) return; // session already cleaned up
       if (!session.serverPackets) {
         logger.error(
           `[${clientId}] ✗ GT server ${serverHost}:${serverPort} did NOT respond after 15s`
