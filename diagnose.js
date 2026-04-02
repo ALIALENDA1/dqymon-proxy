@@ -515,6 +515,7 @@ function removeCert() {
 /**
  * Start a minimal HTTPS server that serves modified server_data
  * pointing the game to 127.0.0.1:17091 (our UDP listener).
+ * Non-server_data requests are proxied to the real GT server.
  */
 function startRelayHttpsServer(serverDataBody) {
   return new Promise((resolve, reject) => {
@@ -544,9 +545,77 @@ function startRelayHttpsServer(serverDataBody) {
       if (line.trim()) dim(line.length > 100 ? line.substring(0, 100) + "..." : line);
     }
 
-    // Handler for server_data requests
+    /**
+     * Proxy a non-server_data request to the real GT server.
+     * Routes to the correct IP based on the Host header.
+     */
+    function proxyToReal(req, res, body) {
+      const reqHost = (req.headers.host || "").split(":")[0].toLowerCase();
+      // Find the real endpoint IP for this hostname
+      let ep = GT_ENDPOINTS[0]; // default
+      for (const e of GT_ENDPOINTS) {
+        if (e.host.toLowerCase() === reqHost) { ep = e; break; }
+      }
+
+      const proxyOpts = {
+        hostname: ep.ip,
+        port: 443,
+        path: req.url,
+        method: req.method || "GET",
+        headers: { ...req.headers, host: ep.host },
+        servername: ep.host,
+        timeout: 8000,
+        rejectUnauthorized: true,
+      };
+      // Remove hop-by-hop headers
+      delete proxyOpts.headers["connection"];
+      delete proxyOpts.headers["accept-encoding"];
+
+      const proxyReq = https.request(proxyOpts, (resp) => {
+        const chunks = [];
+        resp.on("data", (c) => chunks.push(c));
+        resp.on("end", () => {
+          if (res.destroyed) return;
+          const respBody = Buffer.concat(chunks);
+          ok(`[PROXY] ${req.method} ${req.url} → ${resp.statusCode} (${respBody.length}b)`);
+          try {
+            const headers = { ...resp.headers };
+            headers["cache-control"] = "no-store";
+            res.writeHead(resp.statusCode, headers);
+            res.end(respBody);
+          } catch {}
+        });
+      });
+
+      proxyReq.on("error", (err) => {
+        warn(`[PROXY] ${req.url} failed: ${err.message}`);
+        if (!res.destroyed && !res.headersSent) {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("Proxy error");
+        }
+      });
+
+      proxyReq.on("timeout", () => {
+        proxyReq.destroy();
+        if (!res.destroyed && !res.headersSent) {
+          res.writeHead(504, { "Content-Type": "text/plain" });
+          res.end("Timeout");
+        }
+      });
+
+      if (body) proxyReq.write(body);
+      proxyReq.end();
+    }
+
+    // Handler: serve modified server_data for server_data.php,
+    // proxy everything else to the real GT server.
     function handleRequest(req, res) {
-      if (req.method === "POST") {
+      const isServerData = req.url && (
+        req.url.includes("/growtopia/server_data.php") ||
+        req.url.includes("server_data.php")
+      );
+
+      if (req.method === "POST" || req.method === "PUT") {
         const chunks = [];
         let size = 0;
         req.on("data", (c) => {
@@ -555,9 +624,15 @@ function startRelayHttpsServer(serverDataBody) {
         });
         req.on("end", () => {
           if (res.destroyed) return;
-          ok(`[HTTPS] ${req.method} ${req.url} from game client`);
-          res.writeHead(200, { "Content-Type": "text/plain" });
-          res.end(modifiedBody);
+          const body = Buffer.concat(chunks);
+          if (isServerData) {
+            ok(`[HTTPS] ${req.method} ${req.url} — serving modified server_data`);
+            res.writeHead(200, { "Content-Type": "text/plain" });
+            res.end(modifiedBody);
+          } else {
+            ok(`[HTTPS] ${req.method} ${req.url} — proxying to real GT server`);
+            proxyToReal(req, res, body);
+          }
         });
         req.on("error", () => {
           if (!res.destroyed && !res.headersSent) {
@@ -565,9 +640,14 @@ function startRelayHttpsServer(serverDataBody) {
           }
         });
       } else {
-        ok(`[HTTPS] ${req.method} ${req.url} from game client`);
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end(modifiedBody);
+        if (isServerData) {
+          ok(`[HTTPS] ${req.method} ${req.url} — serving modified server_data`);
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(modifiedBody);
+        } else {
+          ok(`[HTTPS] ${req.method} ${req.url} — proxying to real GT server`);
+          proxyToReal(req, res, null);
+        }
       }
     }
 
