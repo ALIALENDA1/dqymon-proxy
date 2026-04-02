@@ -73,18 +73,25 @@ class GrowtopiaProxy {
     this.clientSocket = dgram.createSocket({ type: "udp4", reuseAddr: true });
 
     this.clientSocket.on("message", (msg, rinfo) => {
-      // Route: check if this is a GT server response first
+      const clientKey = `${rinfo.address}:${rinfo.port}`;
+
+      // IMPORTANT: Check known clients FIRST to prevent wildcard server
+      // matching from capturing client packets (which would reflect them
+      // back to the client instead of forwarding to the GT server).
+      if (this.sessions.has(clientKey)) {
+        this.handleClientPacket(this.sessions.get(clientKey), msg, rinfo);
+        return;
+      }
+
+      // Check if this is a GT server response
       const serverSession = this.findSessionForServerResponse(rinfo);
       if (serverSession) {
         this.handleServerMessage(serverSession, msg, rinfo);
         return;
       }
 
-      // Otherwise it's from a GT client
-      const clientKey = `${rinfo.address}:${rinfo.port}`;
-      if (!this.sessions.has(clientKey)) {
-        this.createSession(clientKey, rinfo);
-      }
+      // New client connection
+      this.createSession(clientKey, rinfo);
       this.handleClientPacket(this.sessions.get(clientKey), msg, rinfo);
     });
 
@@ -132,9 +139,13 @@ class GrowtopiaProxy {
       }
     }
 
-    // Strategy 3: Wildcard — if one session, accept any non-local packet
+    // Strategy 3: Wildcard — if one session, accept any non-client packet
     if (this.sessions.size === 1) {
       const session = this.sessions.values().next().value;
+      // Guard: never match the session's own client address
+      if (rinfo.address === session.clientAddr && rinfo.port === session.clientPort) {
+        return null;
+      }
       if (session.serverPackets === 0) {
         logger.info(
           `[${session.clientId}] Matched server by wildcard (${rinfo.address}:${rinfo.port})`
@@ -155,16 +166,19 @@ class GrowtopiaProxy {
     this.totalClientPackets++;
 
     // Log first few packets and then periodically
-    if (session.clientPackets <= 5 || session.clientPackets % 50 === 0) {
+    if (session.clientPackets <= 10 || session.clientPackets % 50 === 0) {
       logger.info(
         `[${session.clientId}] Client → Server: ${msg.length} bytes (pkt #${session.clientPackets})`
       );
     }
 
-    // Detailed ENet diagnostic for the very first packet
+    // Detailed ENet diagnostic for the first few packets to learn the format
+    if (session.clientPackets <= 5) {
+      this.logENetDiagnostic(session, msg, "C→S");
+    }
+
+    // Run the mirror test on the FIRST packet only
     if (session.clientPackets === 1) {
-      this.logENetDiagnostic(session, msg);
-      // Run the mirror test: send from a fresh socket to confirm reachability
       this.mirrorTest(session, msg);
     }
 
@@ -210,10 +224,15 @@ class GrowtopiaProxy {
     }
 
     // Log first few packets and then periodically
-    if (session.serverPackets <= 5 || session.serverPackets % 50 === 0) {
+    if (session.serverPackets <= 10 || session.serverPackets % 50 === 0) {
       logger.info(
         `[${session.clientId}] Server → Client: ${msg.length} bytes (pkt #${session.serverPackets})`
       );
+    }
+
+    // Log detailed format info for first few server packets
+    if (session.serverPackets <= 5) {
+      this.logENetDiagnostic(session, msg, "S→C");
     }
 
     // Inspect/modify server-to-client traffic (OnSendToServer, etc.)
@@ -377,105 +396,158 @@ class GrowtopiaProxy {
   }
 
   /**
-   * Parse and log detailed information about the first ENet packet.
-   * Includes CRC32 verification to determine packet structure.
+   * Parse and log detailed information about an ENet packet.
+   * Tries multiple header formats to detect GT's custom ENet variant.
+   * @param {object} session
+   * @param {Buffer} buf
+   * @param {string} direction - "C→S" or "S→C"
    */
-  logENetDiagnostic(session, buf) {
-    const hex = buf.slice(0, Math.min(buf.length, 64)).toString("hex").match(/.{1,2}/g).join(" ");
-    logger.info(`[${session.clientId}] Raw packet (${buf.length}b): ${hex}`);
+  logENetDiagnostic(session, buf, direction = "") {
+    const dirTag = direction ? ` ${direction}` : "";
+    const hex = buf.slice(0, Math.min(buf.length, 80)).toString("hex").match(/.{1,2}/g).join(" ");
+    logger.debug(`[${session.clientId}]${dirTag} Raw (${buf.length}b): ${hex}`);
 
-    if (buf.length < 4) {
-      logger.warn(`[${session.clientId}] Packet too small (${buf.length} bytes)`);
-      return;
-    }
+    if (buf.length < 4) return;
 
     const peerIDField = buf.readUInt16BE(0);
     const hasSentTime = !!(peerIDField & 0x8000);
     const isCompressed = !!(peerIDField & 0x4000);
     const rawPeerID = peerIDField & 0x0FFF;
 
-    logger.info(
-      `[${session.clientId}] Header: peerID=0x${peerIDField.toString(16)} ` +
-      `(raw=${rawPeerID}) sentTime=${hasSentTime} compressed=${isCompressed}`
-    );
-
     if (isCompressed) {
-      logger.warn(`[${session.clientId}] Compressed datagram — cannot inspect further`);
+      logger.debug(`[${session.clientId}]${dirTag} Compressed datagram — forwarded as-is`);
       return;
     }
 
-    // ── CRC32 Verification ─────────────────────────────────────────
-    // Try all possible checksum positions to determine the real format.
-    // Growtopia uses CRC32; standard ENet might not.
-    const baseOffset = 2 + (hasSentTime ? 2 : 0);
+    // ── Try all possible header layouts ────────────────────────────
+    // GT uses a modified ENet. We try every combination of sentTime and
+    // checksum position to find a layout where the command byte is valid
+    // and (if checksum is present) the CRC32 matches.
+    const layouts = [];
 
-    const checksumPositions = [
-      { name: "no-checksum", offset: baseOffset, checksumAt: -1 },
-      { name: "checksum-after-header", offset: baseOffset + 4, checksumAt: baseOffset },
+    // Standard: flags from peerID field
+    const baseOffset = 2 + (hasSentTime ? 2 : 0);
+    layouts.push({ name: "std", cmdOffset: baseOffset, crcOffset: -1 });
+    layouts.push({ name: "std+crc", cmdOffset: baseOffset + 4, crcOffset: baseOffset });
+
+    // Force sentTime ON (GT might always include sentTime regardless of flag)
+    if (!hasSentTime) {
+      layouts.push({ name: "forceST", cmdOffset: 4, crcOffset: -1 });
+      layouts.push({ name: "forceST+crc", cmdOffset: 8, crcOffset: 4 });
+    }
+
+    const cmdNames = {
+      1: "ACK", 2: "CONNECT", 3: "VERIFY_CONNECT", 4: "DISCONNECT",
+      5: "PING", 6: "SEND_RELIABLE", 7: "SEND_UNRELIABLE", 8: "SEND_FRAGMENT",
+      9: "SEND_UNSEQUENCED", 10: "BW_LIMIT", 11: "THROTTLE", 12: "SEND_UNRELIABLE_FRAG",
+    };
+
+    let bestParse = null;
+
+    for (const layout of layouts) {
+      if (layout.cmdOffset >= buf.length) continue;
+
+      const cmdByte = buf[layout.cmdOffset];
+      const cmdType = cmdByte & 0x0F;
+      if (cmdType < 1 || cmdType > 12) continue;
+
+      const cmdName = cmdNames[cmdType];
+      let crcOk = null;
+
+      if (layout.crcOffset >= 0 && layout.crcOffset + 4 <= buf.length) {
+        const stored = buf.readUInt32LE(layout.crcOffset);
+        const testBuf = Buffer.from(buf);
+        testBuf.writeUInt32LE(0, layout.crcOffset);
+        const computed = GrowtopiaProxy.crc32(testBuf);
+        crcOk = stored === computed;
+      }
+
+      const quality = (crcOk === true ? 2 : 0) + (cmdType >= 1 && cmdType <= 12 ? 1 : 0);
+      if (!bestParse || quality > bestParse.quality) {
+        bestParse = { layout: layout.name, cmdByte, cmdType, cmdName, crcOk, quality, cmdOffset: layout.cmdOffset };
+      }
+    }
+
+    if (bestParse) {
+      const crcStr = bestParse.crcOk === true ? "CRC32✓" : bestParse.crcOk === false ? "CRC32✗" : "no-CRC";
+      logger.debug(
+        `[${session.clientId}]${dirTag} Parse: [${bestParse.layout}] ` +
+        `cmd=0x${bestParse.cmdByte.toString(16)}→${bestParse.cmdName} (${crcStr})`
+      );
+
+      // For data-carrying commands, try to extract the GT payload
+      if ((bestParse.cmdType === 6 || bestParse.cmdType === 7) && buf.length > bestParse.cmdOffset + 6) {
+        const dataLenOffset = bestParse.cmdType === 6 ? bestParse.cmdOffset + 4 : bestParse.cmdOffset + 6;
+        if (dataLenOffset + 2 <= buf.length) {
+          const dataLen = buf.readUInt16BE(dataLenOffset);
+          const dataStart = dataLenOffset + 2;
+          if (dataStart + 4 <= buf.length) {
+            const gtType = buf.readUInt32LE(dataStart);
+            logger.info(
+              `[${session.clientId}]${dirTag} GT payload: type=${gtType} ` +
+              `(${gtType === 1 ? "HELLO" : gtType === 2 ? "LOGIN" : gtType === 3 ? "TEXT" : gtType === 4 ? "TANK" : "?"}) ` +
+              `len=${dataLen}b`
+            );
+
+            // Dump first 120 chars of text for types 2 and 3
+            if ((gtType === 2 || gtType === 3) && dataStart + 4 < buf.length) {
+              const textPart = buf.toString("utf8", dataStart + 4, Math.min(buf.length, dataStart + 4 + 120));
+              logger.debug(`[${session.clientId}]${dirTag} Text: ${textPart.replace(/[\r\n]/g, "\\n").substring(0, 120)}`);
+            }
+          }
+        }
+      }
+    } else {
+      logger.debug(
+        `[${session.clientId}]${dirTag} Unknown ENet format — bytes forwarded as-is`
+      );
+    }
+
+    // ── Scan for GT packet signatures in raw bytes ────────────────
+    // Even if we can't parse the ENet header, look for known GT
+    // payload patterns anywhere in the packet to help reverse-engineer
+    // the format. Only log for first 3 packets to avoid spam.
+    if ((session.clientPackets || 0) + (session.serverPackets || 0) <= 6) {
+      this.scanForGTSignatures(session, buf, dirTag);
+    }
+  }
+
+  /**
+   * Scan raw bytes for known Growtopia payload signatures.
+   * This works regardless of the ENet header format — it looks for
+   * known byte patterns in the raw UDP datagram to help us understand
+   * where the GT payload starts.
+   */
+  scanForGTSignatures(session, buf, dirTag) {
+    // Look for known text patterns that appear in GT login/text packets
+    const signatures = [
+      { pattern: "tankIDName", desc: "LOGIN" },
+      { pattern: "requestedName", desc: "LOGIN" },
+      { pattern: "action|", desc: "ACTION" },
+      { pattern: "OnSendToServer", desc: "REDIRECT" },
+      { pattern: "OnConsoleMessage", desc: "CONSOLE" },
+      { pattern: "OnSpawn", desc: "SPAWN" },
     ];
 
-    // Also try with sentTime even if bit not set (GT custom)
-    if (!hasSentTime) {
-      checksumPositions.push(
-        { name: "force-sentTime+no-crc", offset: 4, checksumAt: -1 },
-        { name: "force-sentTime+crc", offset: 8, checksumAt: 4 },
-      );
-    }
-
-    for (const pos of checksumPositions) {
-      if (pos.offset >= buf.length) continue;
-
-      // If this position has a checksum, verify CRC32
-      let crcMatch = "N/A";
-      if (pos.checksumAt >= 0 && pos.checksumAt + 4 <= buf.length) {
-        const storedCrc = buf.readUInt32LE(pos.checksumAt);
-        // Zero out checksum field, compute CRC32, compare
-        const testBuf = Buffer.from(buf);
-        testBuf.writeUInt32LE(0, pos.checksumAt);
-        const computed = GrowtopiaProxy.crc32(testBuf);
-        crcMatch = (storedCrc === computed)
-          ? `✓ VALID (0x${storedCrc.toString(16)})`
-          : `✗ mismatch (stored=0x${storedCrc.toString(16)} computed=0x${computed.toString(16)})`;
-      }
-
-      const cmdByte = buf[pos.offset];
-      const cmdType = cmdByte & 0x0F;
-      const cmdNames = {
-        1: "ACKNOWLEDGE", 2: "CONNECT", 3: "VERIFY_CONNECT",
-        4: "DISCONNECT", 5: "PING", 6: "SEND_RELIABLE",
-        7: "SEND_UNRELIABLE", 8: "SEND_FRAGMENT", 9: "SEND_UNSEQUENCED",
-        10: "BANDWIDTH_LIMIT", 11: "THROTTLE_CONFIGURE", 12: "SEND_UNRELIABLE_FRAGMENT",
-      };
-      const cmdName = cmdNames[cmdType] || `INVALID(${cmdType})`;
-      const isValid = cmdType >= 1 && cmdType <= 12;
-
-      logger.info(
-        `[${session.clientId}] Parse attempt [${pos.name}]: ` +
-        `cmd@${pos.offset}=0x${cmdByte.toString(16)} → ${cmdName} ` +
-        `valid=${isValid} CRC32=${crcMatch}`
-      );
-
-      // If we found a valid command with matching CRC32, this is likely correct
-      if (isValid && crcMatch.startsWith("✓")) {
-        logger.info(`[${session.clientId}] ✓ Best parse: ${pos.name} → ${cmdName}`);
-
-        // Parse CONNECT details
-        if (cmdType === 2 && buf.length >= pos.offset + 4 + 36) {
-          const cs = pos.offset + 4;
-          logger.info(
-            `[${session.clientId}] CONNECT: outPeerID=${buf.readUInt16BE(cs)} ` +
-            `MTU=${buf.readUInt32BE(cs + 4)} channels=${buf.readUInt32BE(cs + 12)} ` +
-            `connectID=0x${buf.readUInt32BE(cs + 32).toString(16)}`
-          );
+    const text = buf.toString("utf8", 0, Math.min(buf.length, 4096));
+    for (const sig of signatures) {
+      const idx = text.indexOf(sig.pattern);
+      if (idx !== -1) {
+        logger.info(
+          `[${session.clientId}]${dirTag} ✓ Found "${sig.pattern}" at offset ${idx} (${sig.desc})`
+        );
+        // Check for GT type header (uint32LE) 4 bytes before the text
+        if (idx >= 4) {
+          const possibleType = buf.readUInt32LE(idx - 4);
+          if (possibleType >= 1 && possibleType <= 10) {
+            logger.info(
+              `[${session.clientId}]${dirTag} ✓ GT type=${possibleType} at offset ${idx - 4} — ` +
+              `ENet payload likely starts at offset ${idx - 4}`
+            );
+          }
         }
-        return;
       }
     }
-
-    logger.warn(
-      `[${session.clientId}] Could not definitively parse the packet format. ` +
-      `Growtopia may use a custom ENet variant. Bytes are forwarded as-is.`
-    );
   }
 
   /**
