@@ -613,19 +613,33 @@ class GrowtopiaProxy {
    * Returns modified payload Buffer, or original if spoofing is disabled.
    */
   spoofLoginInfo(session, data) {
-    // Use latin1 for lossless byte↔char round-trip.
-    // CRITICAL: The GT client separates most login fields with \n, but some
-    // adjacent fields (observed: zf and lmode) use \0 as separator instead.
-    // After the text's null terminator there may be binary padding bytes
-    // (observed: 0xFF). We must:
-    //   1. Normalize \0 → \n so fields like "zf|...\0lmode|1" split properly
-    //   2. Strip \r and binary garbage lines
-    //   3. Keep only valid key|value lines
-    // Without this, the regex spoof of "zf" destroys adjacent "lmode|1",
-    // and the sub-server rejects the login ("Bad logon").
-    let text = data.toString("latin1", 4)
-      .replace(/\0/g, "\n")       // normalize null separators to newlines
-      .replace(/\r/g, "")         // strip carriage returns
+    // Parse binary login payload into key|value pairs.
+    // The GT client uses \n (0x0A) as the primary field separator but between
+    // certain adjacent fields (zf→lmode) it uses other non-printable bytes.
+    // We replace ALL non-printable / non-ASCII bytes with \n, then keep only
+    // lines that look like valid key|value pairs.
+    const rawBytes = data.slice(4);
+
+    // Hex-dump around "zf|" for debugging the mysterious separator
+    if (session.isSubServerRedirect) {
+      const zfIdx = rawBytes.indexOf(Buffer.from("zf|", "latin1"));
+      if (zfIdx >= 0) {
+        const start = zfIdx;
+        const end = Math.min(start + 50, rawBytes.length);
+        const hexDump = Array.from(rawBytes.slice(start, end))
+          .map(b => b.toString(16).padStart(2, "0")).join(" ");
+        const asciiDump = Array.from(rawBytes.slice(start, end))
+          .map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
+        logger.info(`[${session.clientId}] HEX zf area: ${hexDump}`);
+        logger.info(`[${session.clientId}] ASC zf area: ${asciiDump}`);
+      }
+    }
+
+    let text = rawBytes.toString("latin1")
+      // Replace ALL non-printable and non-ASCII bytes with \n.
+      // Preserves only printable ASCII (0x20-0x7E) plus tab (0x09).
+      // \n (0x0A) is already a valid separator; \r (0x0D) becomes \n.
+      .replace(/[^\x09\x0a\x20-\x7e]/g, "\n")
       .split("\n")
       .filter(l => /^[a-zA-Z_]\w*\|/.test(l))  // keep only valid key|value lines
       .join("\n");
