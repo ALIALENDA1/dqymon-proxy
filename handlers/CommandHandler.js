@@ -693,21 +693,34 @@ class CommandHandler {
     return { handled: true, command: "trash" };
   }
 
-  cmdDrop(clientId, args) {
+  async cmdDrop(clientId, args) {
     const amount = Math.min(Math.max(parseInt(args[0]) || 1, 1), 200);
-
     const session = this.proxy.getSession(clientId);
     if (!session || !session.connected || session.serverNetID === null) {
       this.sendChat(clientId, "`4[Proxy]`` Not connected to server");
       return { handled: true, command: "drop" };
     }
-
+    const gel = this.proxy.gameEventLogger;
+    const before = gel.inventory.get(ITEM.DIAMOND_LOCK) || 0;
     const actionText = `action|drop\n|itemID|${ITEM.DIAMOND_LOCK}\n`;
     const pkt = this.buildActionPacket(actionText);
     for (let i = 0; i < amount; i++) {
       this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);
     }
-    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${amount} Diamond Lock${amount === 1 ? "" : "s"}\`\``);
+    // Wait for inventory update (max 2s)
+    let tries = 0;
+    let after = before;
+    while (tries < 20) {
+      await new Promise(r => setTimeout(r, 100));
+      after = gel.inventory.get(ITEM.DIAMOND_LOCK) || 0;
+      if (after < before) break;
+      tries++;
+    }
+    if (after < before) {
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${before - after} Diamond Lock${before - after === 1 ? "" : "s"}\`\``);
+    } else {
+      this.sendChat(clientId, "`4[Proxy]`` Drop failed: No Diamond Locks were removed from your inventory.\nPossible reasons: not enough DLs, blocked spot, or server rejected the drop.");
+    }
     return { handled: true, command: "drop" };
   }
 
