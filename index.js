@@ -158,14 +158,20 @@ class GrowtopiaProxy {
       if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
       if (this.session.serverNetID !== null) {
         try {
-          // CRITICAL: Flush pending data FIRST (e.g., client's TANK 26 response
-          // to OnSendToServer). Without this, disconnectNow() resets the peer
-          // queue and the gateway never receives the acknowledgment, so it
-          // never properly activates the sub-server session token.
+          // Flush pending data FIRST, then send a RELIABLE disconnect.
+          // disconnectNow() sends an UNRELIABLE disconnect that can be lost
+          // in transit — if the gateway never receives it, the sub-server
+          // session token is never activated → "Bad logon".
           const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
           this.outgoingClient.host.flush();
-          peer.disconnectNow(this.outgoingClient.host, 0);
-          this.outgoingClient.host.flush();
+          try {
+            peer.disconnect(this.outgoingClient.host, 0);
+            this.outgoingClient.host.flush();
+            peer.reset();   // free peer slot after DISCONNECT is on the wire
+          } catch (_) {
+            peer.disconnectNow(this.outgoingClient.host, 0);
+            this.outgoingClient.host.flush();
+          }
           logger.info(`[${this.session.clientId}] ✓ Sent disconnect to GT server ${this.session.serverHost}:${this.session.serverPort}`);
         } catch (e) {
           logger.debug(`[${this.session.clientId}] Disconnect error: ${e.message}`);
@@ -179,6 +185,7 @@ class GrowtopiaProxy {
       serverNetID: null,
       serverHost,
       serverPort,
+      isSubServerRedirect,
       lastActivity: Date.now(),
       clientPackets: 0,
       serverPackets: 0,
@@ -216,8 +223,23 @@ class GrowtopiaProxy {
 
     // Ensure outgoing client exists, then connect to real GT server
     this.ensureOutgoingClient();
-    this.outgoingClient.connect(serverHost, serverPort);
-    logger.info(`[${clientId}] Connecting to GT server ${serverHost}:${serverPort}...`);
+
+    if (isSubServerRedirect) {
+      // Delay the sub-server connection so the gateway has time to process
+      // our DISCONNECT and activate the sub-server session token.
+      // Without this, the sub-server checks the token before the gateway
+      // has registered the redirect → "Bad logon".
+      logger.info(`[${clientId}] Sub-server redirect — waiting 500ms for gateway to finalize...`);
+      const savedId = clientId;
+      setTimeout(() => {
+        if (!this.session || this.session.clientId !== savedId) return;
+        this.outgoingClient.connect(serverHost, serverPort);
+        logger.info(`[${savedId}] Connecting to sub-server ${serverHost}:${serverPort}...`);
+      }, 500);
+    } else {
+      this.outgoingClient.connect(serverHost, serverPort);
+      logger.info(`[${clientId}] Connecting to GT server ${serverHost}:${serverPort}...`);
+    }
 
     // Warn if GT server never responds
     this.session.noResponseTimer = setTimeout(() => {
@@ -344,13 +366,20 @@ class GrowtopiaProxy {
       `(${this.session.clientPackets} sent, ${this.session.serverPackets} received)`
     );
 
-    // Disconnect from GT server too — flush pending data first
+    // Disconnect from GT server — use graceful disconnect so the gateway
+    // reliably receives the DISCONNECT (critical for sub-server token activation).
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
         this.outgoingClient.host.flush();
-        peer.disconnectNow(this.outgoingClient.host, 0);
-        this.outgoingClient.host.flush();
+        try {
+          peer.disconnect(this.outgoingClient.host, 0);
+          this.outgoingClient.host.flush();
+          peer.reset();
+        } catch (_) {
+          peer.disconnectNow(this.outgoingClient.host, 0);
+          this.outgoingClient.host.flush();
+        }
       } catch (e) {}
     }
 
@@ -584,7 +613,9 @@ class GrowtopiaProxy {
    * Returns modified payload Buffer, or original if spoofing is disabled.
    */
   spoofLoginInfo(session, data) {
-    let text = data.toString("utf8", 4).replace(/\0+$/, "");
+    // Use latin1 (not utf8) for lossless byte↔char round-trip.
+    // UTF-8 would corrupt any non-ASCII bytes (e.g. in the meta field).
+    let text = data.toString("latin1", 4).replace(/\0+$/, "");
 
     // Parse the login pairs for logging
     const pairs = {};
@@ -604,6 +635,16 @@ class GrowtopiaProxy {
     }).join(" ");
     if (authInfo) {
       logger.info(`[${session.clientId}] Login auth: ${authInfo}`);
+    }
+
+    // For sub-server logins, log ALL fields — critical for debugging "Bad logon"
+    if (session.isSubServerRedirect) {
+      logger.info(`[${session.clientId}] ── Sub-server login packet (ALL fields) ──`);
+      for (const [k, v] of Object.entries(pairs)) {
+        const display = v.length > 60 ? v.substring(0, 60) + `... (${v.length}c)` : v;
+        logger.info(`[${session.clientId}]   ${k} = ${display}`);
+      }
+      logger.info(`[${session.clientId}] ── End login packet ──`);
     }
 
     if (!this.spoofState.enabled) return data;
@@ -628,7 +669,7 @@ class GrowtopiaProxy {
     // Rebuild the binary payload (null-terminated — sub-server requires it)
     const header = Buffer.alloc(4);
     header.writeUInt32LE(2, 0);
-    return Buffer.concat([header, Buffer.from(text + "\0", "utf8")]);
+    return Buffer.concat([header, Buffer.from(text + "\0", "latin1")]);
   }
 
   // ── Utility ────────────────────────────────────────────────────────
@@ -655,21 +696,33 @@ class GrowtopiaProxy {
 
     if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
 
-    // Disconnect both peers — flush pending data, then disconnectNow
+    // Disconnect both peers — flush pending data, then graceful disconnect
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
         this.outgoingClient.host.flush();
-        peer.disconnectNow(this.outgoingClient.host, 0);
-        this.outgoingClient.host.flush();
+        try {
+          peer.disconnect(this.outgoingClient.host, 0);
+          this.outgoingClient.host.flush();
+          peer.reset();
+        } catch (_) {
+          peer.disconnectNow(this.outgoingClient.host, 0);
+          this.outgoingClient.host.flush();
+        }
       } catch (e) {}
     }
     if (this.session.clientNetID !== null) {
       try {
         const peer = this.serverClient.host.getPeer(this.session.clientNetID);
         this.serverClient.host.flush();
-        peer.disconnectNow(this.serverClient.host, 0);
-        this.serverClient.host.flush();
+        try {
+          peer.disconnect(this.serverClient.host, 0);
+          this.serverClient.host.flush();
+          peer.reset();
+        } catch (_) {
+          peer.disconnectNow(this.serverClient.host, 0);
+          this.serverClient.host.flush();
+        }
       } catch (e) {}
     }
 
