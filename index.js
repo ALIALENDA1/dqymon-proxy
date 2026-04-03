@@ -419,19 +419,45 @@ class GrowtopiaProxy {
 
     // ── Proxy command interception (runs on BOTH type 2 and type 3) ──
     // GT sends chat as type 3 normally, but on sub-server connections it
-    // can arrive as type 2. Check both packet types for proxy commands.
+    // can arrive as type 2. Check both for proxy commands.
     if (msgType === 2 || msgType === 3) {
-      const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
       const prefix = config.commands.prefix;
-
-      // Extract command text from "action|input\ntext|/cmd" or plain "/cmd"
       let cmdText = null;
-      if (text.startsWith(prefix)) {
-        cmdText = text;
+
+      if (msgType === 2) {
+        // Type 2 = binary login-format packet. Use the same exec /g parser
+        // as spoofLoginInfo so we get a clean "text" value without junk bytes.
+        const rawText = data.slice(4).toString("latin1")
+          .replace(/[^\x09\x0a\x20-\x7e]/g, "\n");
+        const keyRegex = /([a-zA-Z_]\w*)\|/g;
+        const keyPositions = [];
+        let m;
+        while ((m = keyRegex.exec(rawText)) !== null) {
+          keyPositions.push({ key: m[1], valueStart: m.index + m[0].length });
+        }
+        for (let i = 0; i < keyPositions.length; i++) {
+          const curr = keyPositions[i];
+          if (curr.key === "text") {
+            const nextKeyStart = (i + 1 < keyPositions.length) ? keyPositions[i + 1].valueStart - keyPositions[i + 1].key.length - 1 : rawText.length;
+            const val = rawText.substring(curr.valueStart, nextKeyStart).replace(/[\n]+$/, "");
+            if (val.startsWith(prefix)) {
+              cmdText = val;
+            }
+            break;
+          }
+        }
       } else {
-        const textMatch = text.match(/(?:^|\n)\|?text\|(.+)/);
-        if (textMatch && textMatch[1].startsWith(prefix)) {
-          cmdText = textMatch[1];
+        // Type 3 = normal text packet, clean utf8
+        const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
+        this.gameEventLogger.processClientAction(text);
+
+        if (text.startsWith(prefix)) {
+          cmdText = text;
+        } else {
+          const textMatch = text.match(/(?:^|\n)\|?text\|([^\n]+)/);
+          if (textMatch && textMatch[1].startsWith(prefix)) {
+            cmdText = textMatch[1];
+          }
         }
       }
 
@@ -441,11 +467,6 @@ class GrowtopiaProxy {
           logger.info(`[${session.clientId}] Command executed: ${result.command}`);
           return null;
         }
-      }
-
-      // If type 3, log client action (world join, chat, etc.)
-      if (msgType === 3) {
-        this.gameEventLogger.processClientAction(text);
       }
     }
 
