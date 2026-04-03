@@ -139,10 +139,12 @@ class GrowtopiaProxy {
 
     // Determine target server: pending redirect → login response → static config
     let serverHost, serverPort;
+    let isSubServerRedirect = false;
     if (this.pendingServerQueue.length > 0) {
       const pending = this.pendingServerQueue.shift();
       serverHost = pending.host;
       serverPort = pending.port;
+      isSubServerRedirect = true;
     } else if (this.loginServer && this.loginServer.realServerHost) {
       serverHost = this.loginServer.realServerHost;
       serverPort = this.loginServer.realServerPort;
@@ -185,10 +187,16 @@ class GrowtopiaProxy {
       logger.info(`[${clientId}] Note: server_data had #maint flag`);
     }
 
-    // Regenerate spoof identity for the new connection
-    this.spoofState = this.generateSpoofState();
-    if (this.spoofState.enabled) {
-      logger.info(`[${clientId}] ✓ New spoof identity: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
+    // Only regenerate spoof identity for fresh logins, NOT sub-server redirects.
+    // The sub-server validates the login token against the device fingerprints
+    // from the initial login — changing them causes "Bad logon".
+    if (!isSubServerRedirect) {
+      this.spoofState = this.generateSpoofState();
+      if (this.spoofState.enabled) {
+        logger.info(`[${clientId}] ✓ New spoof identity: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
+      }
+    } else if (this.spoofState.enabled) {
+      logger.info(`[${clientId}] ✓ Keeping spoof identity for sub-server: MAC=${this.spoofState.mac}`);
     }
 
     // Reset game event logger state
