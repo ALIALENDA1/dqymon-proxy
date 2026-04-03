@@ -158,13 +158,15 @@ class GrowtopiaProxy {
       if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
       if (this.session.serverNetID !== null) {
         try {
-          // Use disconnectNow() instead of reset() — sends a proper DISCONNECT
-          // notification to the GT server so it can activate the sub-server token.
-          // reset() drops silently, which can cause "Bad logon" on sub-server.
+          // Send proper DISCONNECT to GT server so it can release the session
+          // and activate the sub-server token. Then flush to send immediately.
           const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
           peer.disconnectNow(this.outgoingClient.host, 0);
-          logger.debug(`[${this.session.clientId}] Sent disconnect to GT server ${this.session.serverHost}:${this.session.serverPort}`);
-        } catch (e) {}
+          this.outgoingClient.host.flush();
+          logger.info(`[${this.session.clientId}] ✓ Sent disconnect to GT server ${this.session.serverHost}:${this.session.serverPort}`);
+        } catch (e) {
+          logger.debug(`[${this.session.clientId}] Disconnect error: ${e.message}`);
+        }
       }
     }
 
@@ -420,6 +422,10 @@ class GrowtopiaProxy {
     // Type 4 = TANK — log tile/item events
     if (msgType === 4 && data.length >= 60) {
       const tankType = data.readUInt32LE(4);
+      const tankNames = { 0: "STATE", 1: "CALL_FUNC", 3: "TILE_REQ", 10: "INV", 18: "ITEM_OBJ", 25: "PING" };
+      if (session.clientPackets <= 10) {
+        logger.info(`[${session.clientId}] Client TANK sub-type: ${tankType}(${tankNames[tankType] || "?"}) ${data.length}b`);
+      }
       this.gameEventLogger.processTankPacket(tankType, data.slice(4));
     }
 
@@ -478,45 +484,60 @@ class GrowtopiaProxy {
     // Handle OnSendToServer — rewrite target to proxy
     if (funcName !== "OnSendToServer") return data;
 
-    logger.info(`[${session.clientId}] Intercepted OnSendToServer`);
+    logger.info(`[${session.clientId}] Intercepted OnSendToServer (${variants.length} args)`);
+
+    // Log ALL variant arguments — critical for debugging Bad logon
+    const typeNames = { 1: "float", 2: "string", 3: "vec2", 4: "vec3", 5: "uint32", 9: "int32" };
+    for (const v of variants) {
+      logger.info(`[${session.clientId}]   arg[${v.index}] (${typeNames[v.type] || "?"}) = ${JSON.stringify(v.value)}`);
+    }
 
     let realPort = 17091;
-    let realToken = 0;
-    let realUser = 0;
     let realAddress = null;
-    let addressFull = "127.0.0.1|0|";
-    // Preserve original variant types for port/token/user
-    let portType = 9, tokenType = 9, userType = 9;
 
     for (const v of variants) {
-      if (v.index === 1 && (v.type === 5 || v.type === 9)) { realPort = v.value; portType = v.type; }
-      if (v.index === 2 && (v.type === 5 || v.type === 9)) { realToken = v.value; tokenType = v.type; }
-      if (v.index === 3 && (v.type === 5 || v.type === 9)) { realUser = v.value; userType = v.type; }
+      if (v.index === 1 && (v.type === 5 || v.type === 9)) realPort = v.value;
       if (v.index === 4 && v.type === 2) {
-        addressFull = v.value;
-        realAddress = addressFull.split("|")[0];
+        realAddress = v.value.split("|")[0];
       }
     }
 
     if (realAddress) {
       logger.info(`[${session.clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
-      logger.info(`[${session.clientId}] Token=${realToken} User=${realUser} Addr=${addressFull}`);
       this.pendingServerQueue.push({ host: realAddress, port: realPort });
     }
 
-    // Rewrite: redirect client back to our proxy, preserving token/user/doorId
+    // Rewrite OnSendToServer: preserve ALL original variant arguments,
+    // only modify port (index 1) and address (index 4).
+    // CRITICAL: the original packet has ${variants.length} args.
+    // Previously we rebuilt with only 5, dropping args 5+ which
+    // the GT client needs to construct a valid sub-server login.
     const proxyHost = config.proxy.host === "0.0.0.0" ? "127.0.0.1" : config.proxy.host;
-    const addrParts = addressFull.split("|");
-    addrParts[0] = proxyHost;
-    const rewrittenAddr = addrParts.join("|");
 
-    return PacketHandler.buildVariantPacket([
-      { type: 2, value: "OnSendToServer" },
-      { type: portType, value: config.proxy.port },
-      { type: tokenType, value: realToken },
-      { type: userType, value: realUser },
-      { type: 2, value: rewrittenAddr },
-    ], -1, 0);
+    const modifiedVariants = variants.map(v => {
+      // Rewrite port to proxy port
+      if (v.index === 1 && (v.type === 5 || v.type === 9)) {
+        return { type: v.type, value: config.proxy.port };
+      }
+      // Rewrite address IP to proxy host, keep doorID and UUID
+      if (v.index === 4 && v.type === 2) {
+        const parts = v.value.split("|");
+        parts[0] = proxyHost;
+        return { type: 2, value: parts.join("|") };
+      }
+      // Pass through ALL other variants unchanged (token, user, args 5+)
+      return { type: v.type, value: v.value };
+    });
+
+    logger.info(`[${session.clientId}] Rewritten OnSendToServer → ${proxyHost}:${config.proxy.port} (${modifiedVariants.length} args preserved)`);
+
+    // Rebuild packet: preserve original 56-byte tank header, only update variant data
+    const modifiedVariantData = PacketHandler.serializeVariantList(modifiedVariants);
+    const newPacket = Buffer.alloc(60 + modifiedVariantData.length);
+    data.copy(newPacket, 0, 0, 60);  // Copy msgType(4) + original tank header(56)
+    newPacket.writeUInt32LE(modifiedVariantData.length, 56);  // Update extraDataSize
+    modifiedVariantData.copy(newPacket, 60);  // Append new variant data
+    return newPacket;
   }
 
   // ── Device Spoofing ───────────────────────────────────────────────
@@ -566,6 +587,16 @@ class GrowtopiaProxy {
 
     // Log original login info
     this.gameEventLogger.logLoginInfo(pairs);
+
+    // Log key authentication fields for sub-server debugging
+    const authFields = ["user", "token", "lmode", "UUIDToken", "doorID", "meta"];
+    const authInfo = authFields.filter(f => pairs[f]).map(f => {
+      const val = pairs[f];
+      return `${f}=${val.length > 20 ? val.substring(0, 20) + "..." : val}`;
+    }).join(" ");
+    if (authInfo) {
+      logger.info(`[${session.clientId}] Login auth: ${authInfo}`);
+    }
 
     if (!this.spoofState.enabled) return data;
 
