@@ -613,9 +613,22 @@ class GrowtopiaProxy {
    * Returns modified payload Buffer, or original if spoofing is disabled.
    */
   spoofLoginInfo(session, data) {
-    // Use latin1 (not utf8) for lossless byte↔char round-trip.
-    // UTF-8 would corrupt any non-ASCII bytes (e.g. in the meta field).
-    let text = data.toString("latin1", 4).replace(/\0+$/, "");
+    // Use latin1 for lossless byte↔char round-trip.
+    // CRITICAL: The GT client separates most login fields with \n, but some
+    // adjacent fields (observed: zf and lmode) use \0 as separator instead.
+    // After the text's null terminator there may be binary padding bytes
+    // (observed: 0xFF). We must:
+    //   1. Normalize \0 → \n so fields like "zf|...\0lmode|1" split properly
+    //   2. Strip \r and binary garbage lines
+    //   3. Keep only valid key|value lines
+    // Without this, the regex spoof of "zf" destroys adjacent "lmode|1",
+    // and the sub-server rejects the login ("Bad logon").
+    let text = data.toString("latin1", 4)
+      .replace(/\0/g, "\n")       // normalize null separators to newlines
+      .replace(/\r/g, "")         // strip carriage returns
+      .split("\n")
+      .filter(l => /^[a-zA-Z_]\w*\|/.test(l))  // keep only valid key|value lines
+      .join("\n");
 
     // Parse the login pairs for logging
     const pairs = {};
@@ -649,7 +662,8 @@ class GrowtopiaProxy {
 
     if (!this.spoofState.enabled) return data;
 
-    // Replace device fingerprints
+    // Replace device fingerprints.
+    // After normalization, text only has \n separators, so ^key\|.+$ is safe.
     const replace = (key, value) => {
       const regex = new RegExp(`^${key}\\|.+$`, "m");
       if (regex.test(text)) {
@@ -666,7 +680,7 @@ class GrowtopiaProxy {
 
     logger.info(`[${session.clientId}] ✓ Spoofed login: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
 
-    // Rebuild the binary payload (null-terminated — sub-server requires it)
+    // Rebuild the binary payload (null-terminated)
     const header = Buffer.alloc(4);
     header.writeUInt32LE(2, 0);
     return Buffer.concat([header, Buffer.from(text + "\0", "latin1")]);
