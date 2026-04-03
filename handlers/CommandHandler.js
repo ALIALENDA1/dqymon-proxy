@@ -707,7 +707,7 @@ class CommandHandler {
     for (let i = 0; i < amount; i++) {
       this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);
     }
-    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${amount} Diamond Lock(s)\`\``);
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${amount} Diamond Lock${amount === 1 ? "" : "s"}\`\``);
     return { handled: true, command: "drop" };
   }
 
@@ -1291,7 +1291,7 @@ class CommandHandler {
       this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` No players matching '\`w${args.join(" ")}\`\`' found`);
     } else {
       this.sendChat(clientId,
-        `\`4[\`#Proxy\`4]\`\` Found ${matches.length} player(s) matching '\`w${args.join(" ")}\`\`':\n` +
+        `\`4[\`#Proxy\`4]\`\` Found ${matches.length} player${matches.length === 1 ? "" : "s"} matching '\`w${args.join(" ")}\`\`':\n` +
         matches.join("\n")
       );
     }
