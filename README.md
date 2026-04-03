@@ -1,28 +1,58 @@
 # dqymon-proxy
 
-ENet-based proxy server for Growtopia with packet interception, custom commands, and a packet analyzer for protocol research.
+MITM proxy for Growtopia built on [growtopia.js](https://github.com/JadlionHD/growtopia.js) — intercepts HTTPS login, rewrites server addresses, and relays all ENet game traffic with full packet inspection and custom commands.
 
 ## Features
 
-- **ENet/UDP Proxy** — Sits between the Growtopia client and server, forwarding traffic over ENet with full packet inspection
-- **Packet Parsing** — Decodes Growtopia protocol message types (Hello, Login, Action, Tank) including 60-byte tank packet headers
-- **Custom Commands** — In-game commands: `/dropdl`, `/warp`, `/outfit`, `/item`, `/help`
-- **Multi-session** — Handles up to 32 concurrent player connections
-- **Packet Analyzer** — Captures, dumps, and formats packets for reverse engineering (hex + ASCII views, file export)
-- **Configurable Logging** — Leveled logger (debug / info / warn / error) with timestamps
+- **ENet Bridge Proxy** — Uses growtopia.js (Rust-based ENet) for proper Growtopia handshake. Accepts client connections on one side, opens a real ENet session to the GT server on the other, and relays everything in between.
+- **HTTPS Login Interception** — Hooks into Growtopia's login endpoint via hosts file redirect, rewrites `server_data` to point the client at the proxy, strips `#maint` flags.
+- **Sub-Server Redirect Handling** — Intercepts `OnSendToServer` variant calls and transparently reroutes the client through the proxy when switching worlds/sub-servers.
+- **Device Spoofing** — Randomizes MAC, RID, hash, hash2, fhash, and zf fields in login packets to mask device fingerprints. Identity is preserved across sub-server redirects to avoid "Bad logon".
+- **Custom Commands** — In-game `/dropdl`, `/warp`, `/outfit`, `/help`. Commands are intercepted before reaching the server — the server never sees your command text.
+- **Game Event Logging** — Tracks variant calls (`OnSpawn`, `OnSetClothing`, `OnTalkBubble`, etc.), player movements, tile changes, and inventory updates.
+- **Packet Analyzer** — Captures, hex-dumps, and exports packets for protocol research.
+- **Configurable Logging** — Leveled logger (debug / info / warn / error) with timestamps.
+
+## How It Works
+
+```
+Growtopia Client
+      │
+      ▼
+  HTTPS Login ──► LoginServer (local HTTPS) ──► Growtopia Login API
+      │               rewrites server_data
+      ▼               to 127.0.0.1:17091
+  ENet Client
+      │
+      ▼
+  serverClient (port 17091)     ◄── growtopia.js ENet server
+      │
+      │  relay packets
+      ▼
+  outgoingClient (ephemeral)    ◄── growtopia.js ENet client
+      │
+      ▼
+  Real GT Server (213.179.209.x)
+```
 
 ## Project Structure
 
 ```
-index.js                  # Main proxy server (ENet host, session management, packet relay)
+index.js                       # Main proxy — ENet bridge, session management, packet relay
+diagnose.js                    # Standalone diagnostic/packet capture tool
 config/
-  config.js               # Proxy, server, commands, cheats, and logging settings
+  config.js                    # Proxy, server, spoof, game launcher, and logging settings
 handlers/
-  CommandHandler.js        # Parses and executes in-game slash commands
-  PacketHandler.js         # Packet parser/builder (text pairs, tank packets), item injection stubs
+  CommandHandler.js            # In-game slash commands (/dropdl, /warp, /outfit, /help)
+  PacketHandler.js             # Packet parser/builder (text pairs, tank packets, variant calls)
 utils/
-  Logger.js               # Leveled console logger
-  PacketAnalyzer.js        # Packet capture, hex formatting, and dump-to-file utility
+  LoginServer.js               # HTTPS login interceptor, server_data rewriter
+  GameLauncher.js              # Hosts file modification, DNS flush, game auto-launch
+  GameEventLogger.js           # Variant call parser, player/world tracking
+  Logger.js                    # Leveled console logger
+  PacketAnalyzer.js            # Packet capture, hex formatting, dump-to-file
+  ENetParser.js                # Multi-layout ENet packet scoring parser
+  GameLog.js                   # Game event log storage
 ```
 
 ## Installation
@@ -35,43 +65,48 @@ npm install
 
 | Package | Purpose |
 |---------|---------|
-| `enet` | ENet networking (UDP) |
+| `growtopia.js` | Rust-based ENet library with Growtopia's custom handshake |
 | `dotenv` | Environment variable loading |
 
-Dev: `nodemon` (auto-reload), `pkg` (single-binary builds)
+Dev: `nodemon` (auto-reload), `@yao-pkg/pkg` (single-binary Windows builds)
 
 ## Configuration
 
 Edit [`config/config.js`](config/config.js):
 
 ```js
-// Proxy — where the client connects
 proxy: {
-  host: "0.0.0.0",        // Listen address
-  port: 17091,             // Listen port (default GT port)
+  host: "0.0.0.0",
+  port: 17091,
   maxPeers: 32,
   channels: 2,
 }
 
-// Real Growtopia server to forward to
 serverConfig: {
   host: "207.180.219.24",
   port: 17091,
   channels: 2,
 }
 
-// Toggle cheat modules
-cheats: {
-  freeDL: true,
-  freeOutfit: true,
-  warpAnywhere: true,
-  freePlace: false,
+spoof: {
+  enabled: true,
+  mac: "random",       // "random" or "02:xx:xx:xx:xx:xx"
+  rid: "random",
+  hash: "random",
+  hash2: "random",
+  fhash: "random",
+  zf: "random",
 }
 
-// Logging
+game: {
+  autoLaunch: true,
+  path: null,          // auto-detect or set path
+  modifyHosts: true,   // redirect GT domains to proxy via hosts file
+}
+
 logging: {
   enabled: true,
-  level: "info",           // debug | info | warn | error
+  level: "info",       // debug | info | warn | error
 }
 ```
 
@@ -85,35 +120,30 @@ npm start
 npm run dev
 ```
 
-### Build standalone binary
+The proxy will:
+1. Start an HTTPS login server (intercepts Growtopia login)
+2. Modify the hosts file to redirect Growtopia domains to localhost
+3. Launch Growtopia (if `game.autoLaunch` is true)
+4. Accept ENet connections on port 17091 and relay to the real server
+
+### Build standalone Windows exe
 
 ```bash
-# Windows x64
 npm run build
-
-# Windows + Linux + macOS
-npm run build:all
 ```
 
-Output goes to `dist/`.
-
-### Point the Growtopia client at the proxy
-
-Set the client's server address to:
-- **Host**: `127.0.0.1` (or wherever the proxy is running)
-- **Port**: `17091` (matches `config.proxy.port`)
+Output: `dist/dqymon-proxy.exe` + `dist/growtopia-js.win32-x64-msvc.node` (must be in the same folder).
 
 ### Commands
 
-All commands use the `/` prefix (configurable in `config.commands.prefix`).
+All commands are intercepted by the proxy and **never sent to the server**.
 
-| Command | Description |
-|---------|-------------|
-| `/dropdl <amount>` | Drop Diamond Locks |
-| `/warp <world>` | Warp to a world |
-| `/outfit <itemid>` | Give a free outfit item |
-| `/item <itemid> [amount]` | Give an item |
-| `/help` | List available commands |
+| Command | Description | Safety |
+|---------|-------------|--------|
+| `/dropdl <amount>` | Drop Diamond Locks from your inventory (max 200) | Server-validated — you must own the DLs |
+| `/warp <world>` | Warp to a world | Server-validated — same as typing in door |
+| `/outfit <hat> [shirt] [pants] [shoes] [face] [hand] [back] [hair] [neck]` | Change visual outfit | Client-side only — other players see your real outfit |
+| `/help` | List available commands | — |
 
 ## Packet Protocol Reference
 
