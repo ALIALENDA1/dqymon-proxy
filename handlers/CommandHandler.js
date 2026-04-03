@@ -138,10 +138,24 @@ class CommandHandler {
       case "banall":   return this.cmdBanall(clientId);
       case "unall":    return this.cmdUnall(clientId);
 
+      // ─── Tier 3: Info & Utility ───
+      case "find":     return this.cmdFind(clientId, args);
+      case "ping":     return this.cmdPing(clientId);
+      case "stats":    return this.cmdStats(clientId);
+      case "clear":    return this.cmdClear(clientId);
+      case "sb":       return this.cmdSb(clientId, args);
+      case "sethome":  return this.cmdSethome(clientId);
+      case "home":     return this.cmdHome(clientId);
+      case "worlds":   return this.cmdWorlds(clientId);
+      case "history":  return this.cmdHistory(clientId);
+      case "copy":     return this.cmdCopy(clientId, args);
+
       // ─── Tier 4: Visual Illusions (Client-Side Only) ───
       case "clothes":
       case "outfit":   return this.cmdClothes(clientId, args);
       case "skin":     return this.cmdSkin(clientId, args);
+      case "weather":  return this.cmdWeather(clientId, args);
+      case "invis":    return this.cmdInvis(clientId);
       case "flag":     return this.cmdFlag(clientId, args);
       case "title":
       case "titles":   return this.cmdTitle(clientId, args);
@@ -206,9 +220,23 @@ class CommandHandler {
       "`5/banall`` — Ban everyone (admin)\n" +
       "`5/unall`` — Unban everyone (admin)\n" +
       "\n" +
+      "`w🔍 Info & Utility``\n" +
+      "`5/find [name]`` — Find player in world\n" +
+      "`5/ping`` — Connection latency & uptime\n" +
+      "`5/stats`` — Detailed session statistics\n" +
+      "`5/clear`` — Clear chat console\n" +
+      "`5/sb [text]`` — Fake super broadcast (local)\n" +
+      "`5/sethome`` — Save current world as home\n" +
+      "`5/home`` — Warp to home world\n" +
+      "`5/worlds`` — List saved worlds\n" +
+      "`5/history`` — World visit history\n" +
+      "`5/copy [name]`` — Copy player outfit (local)\n" +
+      "\n" +
       "`w🎭 Visual (Client-Side)``\n" +
       "`5/clothes [slots...]`` — Change outfit visuals\n" +
       "`5/skin [color]`` — Change skin color\n" +
+      "`5/weather [id]`` — Change weather visual\n" +
+      "`5/invis`` — Toggle invisibility\n" +
       "`5/flag [id]`` — Change flag visual\n" +
       "`5/title [text]`` — Set title visual\n" +
       "`5/name [text]`` — Change name visual\n" +
@@ -1189,10 +1217,324 @@ class CommandHandler {
       "`w/count [wls]`` — Lock breakdown\n" +
       "`w/clothes [ids]`` — Visual outfit\n" +
       "`w/mod`` / `w/dev`` — Visual tags\n" +
+      "`w/find [name]`` — Find player\n" +
+      "`w/ping`` — Connection stats\n" +
+      "`w/stats`` — Session stats\n" +
+      "`w/clear`` — Clear chat\n" +
+      "`w/weather [id]`` — Change weather\n" +
+      "`w/invis`` — Toggle invisibility\n" +
+      "`w/home`` — Warp home\n" +
       "\n" +
       "Type `w/proxy`` for all commands"
     );
     return { handled: true, command: "help" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🔍 TIER 3: Info & Utility
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdFind(clientId, args) {
+    if (args.length === 0) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /find [name] — Search for a player in the current world");
+      return { handled: true, command: "find" };
+    }
+
+    const query = args.join(" ").toLowerCase();
+    const gel = this.proxy.gameEventLogger;
+    const matches = [];
+
+    for (const [netID, info] of gel.players) {
+      if (info.name.toLowerCase().includes(query)) {
+        matches.push(`  \`w${info.name}\`\` ${info.country ? `(${info.country})` : ""} [netID:${netID}]`);
+      }
+    }
+
+    // Also check self
+    if (gel.playerName && gel.playerName.toLowerCase().includes(query)) {
+      matches.unshift(`  \`2${gel.playerName}\`\` (you) [netID:${gel.localNetID}]`);
+    }
+
+    if (matches.length === 0) {
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` No players matching '\`w${args.join(" ")}\`\`' found`);
+    } else {
+      this.sendChat(clientId,
+        `\`4[\`#Proxy\`4]\`\` Found ${matches.length} player(s) matching '\`w${args.join(" ")}\`\`':\n` +
+        matches.join("\n")
+      );
+    }
+    return { handled: true, command: "find" };
+  }
+
+  cmdPing(clientId) {
+    const session = this.proxy.getSession(clientId);
+    if (!session) {
+      this.sendChat(clientId, "`4[Proxy]`` No active session");
+      return { handled: true, command: "ping" };
+    }
+
+    const uptime = Math.floor((Date.now() - (this.proxy.startTime || Date.now())) / 1000);
+    const hours = Math.floor(uptime / 3600);
+    const mins = Math.floor((uptime % 3600) / 60);
+    const secs = uptime % 60;
+    const uptimeStr = `${hours}h ${mins}m ${secs}s`;
+
+    const idle = Math.floor((Date.now() - session.lastActivity) / 1000);
+    const memMB = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
+
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Connection Info:\n" +
+      `  \`wServer:\`\` ${session.serverHost}:${session.serverPort}\n` +
+      `  \`wUptime:\`\` ${uptimeStr}\n` +
+      `  \`wIdle:\`\` ${idle}s\n` +
+      `  \`wPackets:\`\` ↑${session.clientPackets} ↓${session.serverPackets}\n` +
+      `  \`wTotal:\`\` ↑${this.proxy.totalClientPackets} ↓${this.proxy.totalServerPackets}\n` +
+      `  \`wMemory:\`\` ${memMB} MB`
+    );
+    return { handled: true, command: "ping" };
+  }
+
+  cmdStats(clientId) {
+    const session = this.proxy.getSession(clientId);
+    const gel = this.proxy.gameEventLogger;
+    const memUsage = process.memoryUsage();
+    const uptime = Math.floor((Date.now() - (this.proxy.startTime || Date.now())) / 1000);
+    const hours = Math.floor(uptime / 3600);
+    const mins = Math.floor((uptime % 3600) / 60);
+    const secs = uptime % 60;
+
+    const worldHistory = this.store.get("worldHistory") || [];
+    const savedWorlds = this.store.get("savedWorlds") || [];
+    const accounts = this.store.get("accounts") || [];
+
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Session Statistics:\n" +
+      `  \`w⏱ Uptime:\`\` ${hours}h ${mins}m ${secs}s\n` +
+      `  \`w👤 Player:\`\` ${gel.playerName || "(unknown)"}\n` +
+      `  \`w🌍 World:\`\` ${gel.currentWorld || "(none)"}\n` +
+      `  \`w👥 Players visible:\`\` ${gel.players.size}\n` +
+      `  \`w💎 Gems:\`\` ${gel.lastGems !== undefined ? gel.lastGems : "(unknown)"}\n` +
+      `  \`w📦 Packets (session):\`\` ↑${session ? session.clientPackets : 0} ↓${session ? session.serverPackets : 0}\n` +
+      `  \`w📦 Packets (total):\`\` ↑${this.proxy.totalClientPackets} ↓${this.proxy.totalServerPackets}\n` +
+      `  \`w💾 Memory:\`\` ${(memUsage.heapUsed / 1024 / 1024).toFixed(1)} MB / ${(memUsage.heapTotal / 1024 / 1024).toFixed(1)} MB\n` +
+      `  \`w📁 Saved worlds:\`\` ${savedWorlds.length}\n` +
+      `  \`w📜 World history:\`\` ${worldHistory.length} visits\n` +
+      `  \`w🔑 Accounts:\`\` ${accounts.length}\n` +
+      `  \`wMAC:\`\` ${this.proxy.spoofState.enabled ? this.proxy.spoofState.mac : "(unspoofed)"}`
+    );
+    return { handled: true, command: "stats" };
+  }
+
+  cmdClear(clientId) {
+    // Send a bunch of empty lines to push chat off screen
+    const blank = Array(30).fill("").join("\n");
+    this.sendChat(clientId, blank);
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `2✓ Chat cleared``");
+    return { handled: true, command: "clear" };
+  }
+
+  cmdSb(clientId, args) {
+    if (args.length === 0) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /sb [text] — Fake super broadcast (only you see it)");
+      return { handled: true, command: "sb" };
+    }
+
+    const text = args.join(" ");
+    // OnConsoleMessage with broadcast styling
+    this.sendChat(clientId,
+      `\`5>>> \`\`\`w${text}\`\` \`5<<<\`\``
+    );
+    // Also show as text overlay (the big center text)
+    const overlayPacket = PacketHandler.buildTextOverlay(
+      `\`5>>> \`\`\`w${text}\`\` \`5<<<\`\``
+    );
+    this.proxy.sendToClient(clientId, overlayPacket);
+    return { handled: true, command: "sb" };
+  }
+
+  cmdSethome(clientId) {
+    const world = this.proxy.gameEventLogger.currentWorld;
+    if (!world) {
+      this.sendChat(clientId, "`4[Proxy]`` You're not in a world");
+      return { handled: true, command: "sethome" };
+    }
+
+    this.store.set("homeWorld", world);
+    this.store.save();
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Home set to:\`\` \`w${world}\`\``);
+    return { handled: true, command: "sethome" };
+  }
+
+  cmdHome(clientId) {
+    const home = this.store.get("homeWorld");
+    if (!home) {
+      this.sendChat(clientId, "`4[Proxy]`` No home set. Use `w/sethome`` in a world first");
+      return { handled: true, command: "home" };
+    }
+
+    const session = this.proxy.getSession(clientId);
+    if (!session || !session.connected || session.serverNetID === null) {
+      this.sendChat(clientId, "`4[Proxy]`` Not connected to server");
+      return { handled: true, command: "home" };
+    }
+
+    const actionText = `action|join_request\nname|${home}\ninvitedWorld|0\n`;
+    const pkt = this.buildActionPacket(actionText);
+    this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2Warping home →\`\` \`w${home}\`\``);
+    return { handled: true, command: "home" };
+  }
+
+  cmdWorlds(clientId) {
+    const saved = this.store.get("savedWorlds") || [];
+    const home = this.store.get("homeWorld");
+
+    if (saved.length === 0 && !home) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` No saved worlds.\n  `w/save [name]`` — Save current world\n  `w/sethome`` — Set home world");
+      return { handled: true, command: "worlds" };
+    }
+
+    let msg = "`4[`#Proxy`4]`` Saved Worlds:\n";
+    if (home) {
+      msg += `  \`2🏠 Home:\`\` \`w${home}\`\`\n`;
+    }
+    if (saved.length > 0) {
+      const list = saved.map((w, i) => {
+        const ago = Math.floor((Date.now() - w.savedAt) / 60000);
+        const timeStr = ago < 60 ? `${ago}m ago` : `${Math.floor(ago / 60)}h ago`;
+        return `  ${i + 1}. \`w${w.world}\`\`${w.label !== w.world ? ` (${w.label})` : ""} — ${timeStr}`;
+      });
+      msg += list.join("\n");
+    }
+    msg += "\n  Use \`w/warp [world]\`\` or \`w/home\`\` to teleport";
+
+    this.sendChat(clientId, msg);
+    return { handled: true, command: "worlds" };
+  }
+
+  cmdHistory(clientId) {
+    const history = this.store.get("worldHistory") || [];
+
+    if (history.length === 0) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` No world history yet — join some worlds first");
+      return { handled: true, command: "history" };
+    }
+
+    const recent = history.slice(-15).reverse();
+    const lines = recent.map((entry, i) => {
+      const ago = Math.floor((Date.now() - entry.time) / 1000);
+      let timeStr;
+      if (ago < 60) timeStr = `${ago}s ago`;
+      else if (ago < 3600) timeStr = `${Math.floor(ago / 60)}m ago`;
+      else timeStr = `${Math.floor(ago / 3600)}h ${Math.floor((ago % 3600) / 60)}m ago`;
+      return `  ${i + 1}. \`w${entry.world}\`\` — ${timeStr}`;
+    });
+
+    this.sendChat(clientId,
+      `\`4[\`#Proxy\`4]\`\` Recent worlds (${recent.length}):\n` + lines.join("\n")
+    );
+    return { handled: true, command: "history" };
+  }
+
+  cmdCopy(clientId, args) {
+    if (args.length === 0) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /copy [name] — Copy a player's visual appearance (client-side)");
+      return { handled: true, command: "copy" };
+    }
+
+    const query = args.join(" ").toLowerCase();
+    const gel = this.proxy.gameEventLogger;
+    let targetNetID = -1;
+    let targetName = null;
+
+    for (const [netID, info] of gel.players) {
+      if (info.name.toLowerCase().includes(query)) {
+        targetNetID = netID;
+        targetName = info.name;
+        break;
+      }
+    }
+
+    if (targetNetID === -1) {
+      this.sendChat(clientId, `\`4[Proxy]\`\` Player '\`w${args.join(" ")}\`\`' not found in world`);
+      return { handled: true, command: "copy" };
+    }
+
+    // Send OnCopyClothing-style: set name + request the client to copy
+    const namePacket = PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnNameChanged" },
+      { type: 2, value: `\`2${targetName}\`\`` },
+      { type: 9, value: 0 },
+    ], gel.localNetID, 0);
+    this.proxy.sendToClient(clientId, namePacket);
+
+    this.sendChat(clientId,
+      `\`4[\`#Proxy\`4]\`\` \`2✓ Copied name from:\`\` \`w${targetName}\`\` [netID:${targetNetID}]\n` +
+      "  `wNote:`` Outfit copy requires re-entering world (client-side only)"
+    );
+    return { handled: true, command: "copy" };
+  }
+
+  cmdWeather(clientId, args) {
+    if (args.length === 0) {
+      this.sendChat(clientId,
+        "`4[`#Proxy`4]`` Usage: /weather [id] — Change weather visually\n" +
+        "  Common IDs: `w0`` None, `w1`` Rain, `w2`` Sunny, `w3`` Wind,\n" +
+        "  `w4`` Mars, `w5`` Toxic, `w6`` Heatwave, `w7`` Meteor,\n" +
+        "  `w8`` Snow, `w9`` Harvest, `w10`` Nether, `w11`` Comet,\n" +
+        "  `w12`` Holiday, `w18`` Rayman, `w19`` Love, `w20`` StPatrick,\n" +
+        "  `w21`` Pineapple, `w22`` Alien, `w23`` Carnival, `w24`` Summer\n" +
+        "  `w(client-side only — others see normal weather)``"
+      );
+      return { handled: true, command: "weather" };
+    }
+
+    const weatherID = parseInt(args[0]);
+    if (isNaN(weatherID) || weatherID < 0) {
+      this.sendChat(clientId, "`4[Proxy]`` Invalid weather ID");
+      return { handled: true, command: "weather" };
+    }
+
+    // OnSetCurrentWeather(int weatherID)
+    const weatherPacket = PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnSetCurrentWeather" },
+      { type: 9, value: weatherID },
+    ], -1, 0);
+
+    this.proxy.sendToClient(clientId, weatherPacket);
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Weather set to ${weatherID}\`\` (client-side only)`);
+    return { handled: true, command: "weather" };
+  }
+
+  cmdInvis(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    const isInvis = this.getUserState(clientId, "invisible");
+
+    if (isInvis) {
+      // Turn off — reset alpha by sending OnSetClothing with all 0s
+      // (forces client to re-render with normal visibility)
+      this.setUserState(clientId, "invisible", false);
+
+      const resetPacket = PacketHandler.buildVariantPacket([
+        { type: 2, value: "OnSkinColor" },
+        { type: 9, value: 0x78787878 }, // default gray skin
+      ], gel.localNetID, 0);
+      this.proxy.sendToClient(clientId, resetPacket);
+
+      this.sendChat(clientId, "`4[`#Proxy`4]`` \`2Invisible OFF\`\` — you are visible again (client-side)");
+    } else {
+      // Turn on — set alpha to near-transparent
+      this.setUserState(clientId, "invisible", true);
+
+      const invisPacket = PacketHandler.buildVariantPacket([
+        { type: 2, value: "OnSkinColor" },
+        { type: 9, value: 0x10FFFFFF }, // near-transparent white
+      ], gel.localNetID, 0);
+      this.proxy.sendToClient(clientId, invisPacket);
+
+      this.sendChat(clientId, "`4[`#Proxy`4]`` \`5Invisible ON\`\` — you appear invisible to yourself (client-side only, others still see you)");
+    }
+    return { handled: true, command: "invis" };
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -14,6 +14,7 @@ class GameEventLogger {
     this.localNetID = -1;
     this.players = new Map(); // netID → { name, country }
     this.lastGems = undefined;  // last known gem count
+    this.onWorldJoin = null;    // callback for world history tracking
   }
 
   // ── Color stripping ──────────────────────────────────────────────
@@ -36,10 +37,13 @@ class GameEventLogger {
   parseKeyValues(text) {
     const pairs = {};
     const lines = text.split("\n");
-    for (const line of lines) {
+    for (let line of lines) {
+      // GT uses "|key|value" format (leading pipe) on some fields
+      if (line.startsWith("|")) line = line.substring(1);
       const idx = line.indexOf("|");
       if (idx !== -1) {
-        pairs[line.substring(0, idx).trim()] = line.substring(idx + 1).trim();
+        const key = line.substring(0, idx).trim();
+        if (key) pairs[key] = line.substring(idx + 1).trim();
       }
     }
     return pairs;
@@ -253,6 +257,9 @@ class GameEventLogger {
         this.currentWorld = pairs.name || "";
         this.players.clear();
         this.logger.game(`[JOIN] Joining world: ${this.currentWorld}`);
+        if (this.currentWorld && this.onWorldJoin) {
+          this.onWorldJoin(this.currentWorld);
+        }
         break;
       case "quit_to_exit":
         this.logger.game(`[EXIT] Left world: ${this.currentWorld}`);

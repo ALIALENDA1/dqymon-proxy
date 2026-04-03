@@ -56,6 +56,8 @@ class GrowtopiaProxy {
     // Global packet counters
     this.totalClientPackets = 0;
     this.totalServerPackets = 0;
+    // Proxy start time for uptime tracking
+    this.startTime = Date.now();
     // Device spoofing state (generated once per proxy session)
     this.spoofState = this.generateSpoofState();
   }
@@ -316,8 +318,12 @@ class GrowtopiaProxy {
     if (this.session.connected && this.session.serverNetID !== null) {
       this.outgoingClient.send(this.session.serverNetID, ch, modified);
     } else {
-      // Buffer until outgoing connection is established
-      this.session.pendingClientData.push({ ch, data: modified });
+      // Buffer until outgoing connection is established (cap at 200 to prevent memory leak)
+      if (this.session.pendingClientData.length < 200) {
+        this.session.pendingClientData.push({ ch, data: modified });
+      } else {
+        logger.warn(`[${this.session.clientId}] Pending buffer full — dropping client packet`);
+      }
     }
   }
 
@@ -402,6 +408,8 @@ class GrowtopiaProxy {
     // Don't disconnect the game client — it may reconnect for sub-server redirect
     this.session.connected = false;
     this.session.serverNetID = null;
+    // Clear buffered data — stale packets must not be flushed to a new sub-server
+    this.session.pendingClientData = [];
   }
 
   // ── Growtopia-level payload handlers ──────────────────────────────
@@ -540,9 +548,9 @@ class GrowtopiaProxy {
 
     // CALL_FUNCTION (tankType 1) — parse variant list
     const extraDataSize = data.readUInt32LE(56);
-    if (extraDataSize === 0 || data.length < 60 + extraDataSize) return data;
+    if (extraDataSize === 0 || extraDataSize > 1048576 || data.length < 60 + extraDataSize) return data;
 
-    const extraData = data.slice(60);
+    const extraData = data.slice(60, 60 + extraDataSize);
 
     // Parse variants using the proper parser
     const variants = PacketHandler.parseVariantList(extraData);
@@ -634,8 +642,8 @@ class GrowtopiaProxy {
 
     return {
       enabled: true,
-      mac: spoofConfig.mac === "random" ? randomMAC() : (spoofConfig.mac || randomMAC()),
-      rid: spoofConfig.rid === "random" ? randomHex(16).toUpperCase() : (spoofConfig.rid || randomHex(16)),
+      mac: String(spoofConfig.mac === "random" ? randomMAC() : (spoofConfig.mac || randomMAC())),
+      rid: String(spoofConfig.rid === "random" ? randomHex(16).toUpperCase() : (spoofConfig.rid || randomHex(16))),
       hash: spoofConfig.hash === "random" ? randomInt() : (spoofConfig.hash || randomInt()),
       hash2: spoofConfig.hash2 === "random" ? randomInt() : (spoofConfig.hash2 || randomInt()),
       fhash: spoofConfig.fhash === "random" ? randomSignedInt() : (spoofConfig.fhash || randomSignedInt()),
@@ -821,6 +829,17 @@ Logger.section("Initializing");
 proxy.loginServer = loginServer;
 proxy.gameLog = gameLog;
 loginServer.gameLog = gameLog;
+
+// Track world visit history for /history command
+proxy.gameEventLogger.onWorldJoin = (world) => {
+  const store = proxy.commandHandler.store;
+  const history = store.get("worldHistory") || [];
+  history.push({ world, time: Date.now() });
+  // Keep last 50 entries
+  if (history.length > 50) history.splice(0, history.length - 50);
+  store.set("worldHistory", history);
+  store.save();
+};
 
 // When a new login (server_data) is served, clear the current session.
 // The game client may reconnect from the same or a different port.

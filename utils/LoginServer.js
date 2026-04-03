@@ -107,6 +107,14 @@ class LoginServer {
     this.servers = [];
     this.certInstalled = false;
     this.rateLimitMap = new Map(); // ip -> { count, resetTime }
+    // Periodically purge expired rate-limit entries to prevent memory leak
+    this._rateLimitCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [ip, entry] of this.rateLimitMap) {
+        if (now > entry.resetTime) this.rateLimitMap.delete(ip);
+      }
+    }, 5 * 60 * 1000); // every 5 minutes
+    if (this._rateLimitCleanupTimer.unref) this._rateLimitCleanupTimer.unref();
     this.gameLog = null; // set externally by index.js
     // The real GT server address/port extracted from the login response.
     // index.js reads these to know where to connect via ENet.
@@ -664,10 +672,10 @@ class LoginServer {
   removeCert() {
     if (process.platform !== "win32") return;
     try {
-      // Remove by subject matching our CN (www.growtopia1.com)
+      // Remove only OUR self-signed cert by matching exact CN
       execSync(
         'powershell -Command "Get-ChildItem Cert:\\LocalMachine\\Root | ' +
-        "Where-Object { $_.Subject -match 'growtopia' } | " +
+        "Where-Object { $_.Subject -eq 'CN=www.growtopia1.com' } | " +
         'Remove-Item -Force"',
         { stdio: "pipe" }
       );
@@ -679,6 +687,10 @@ class LoginServer {
   }
 
   stop() {
+    if (this._rateLimitCleanupTimer) {
+      clearInterval(this._rateLimitCleanupTimer);
+      this._rateLimitCleanupTimer = null;
+    }
     for (const server of this.servers) {
       try { server.close(); } catch {}
     }
