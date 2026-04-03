@@ -158,8 +158,12 @@ class GrowtopiaProxy {
       if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
       if (this.session.serverNetID !== null) {
         try {
+          // Use disconnectNow() instead of reset() — sends a proper DISCONNECT
+          // notification to the GT server so it can activate the sub-server token.
+          // reset() drops silently, which can cause "Bad logon" on sub-server.
           const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
-          peer.reset(this.outgoingClient.host);
+          peer.disconnectNow(this.outgoingClient.host, 0);
+          logger.debug(`[${this.session.clientId}] Sent disconnect to GT server ${this.session.serverHost}:${this.session.serverPort}`);
         } catch (e) {}
       }
     }
@@ -339,7 +343,7 @@ class GrowtopiaProxy {
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
-        peer.reset(this.outgoingClient.host);
+        peer.disconnectNow(this.outgoingClient.host, 0);
       } catch (e) {}
     }
 
@@ -433,11 +437,15 @@ class GrowtopiaProxy {
 
     const msgType = data.readUInt32LE(0);
 
-    // Log server text packets (type 2 / type 3)
+    // Log server text packets (type 2 / type 3) — info level for first 10
     if (msgType === 2 || msgType === 3) {
       const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
       if (text.trim()) {
-        logger.debug(`[${session.clientId}] Server text (type ${msgType}): ${text.substring(0, 120)}`);
+        if (session.serverPackets <= 10) {
+          logger.info(`[${session.clientId}] Server text (type ${msgType}): ${text.substring(0, 200)}`);
+        } else {
+          logger.debug(`[${session.clientId}] Server text (type ${msgType}): ${text.substring(0, 120)}`);
+        }
       }
     }
 
@@ -463,10 +471,11 @@ class GrowtopiaProxy {
     if (variants.length === 0) return data;
 
     // Log the game event
+    const funcName = (variants[0] && variants[0].type === 2) ? variants[0].value : "";
+    logger.info(`[${session.clientId}] Variant call: ${funcName} (${variants.length} args)`);
     this.gameEventLogger.processVariantCall(variants, session.clientId);
 
     // Handle OnSendToServer — rewrite target to proxy
-    const funcName = (variants[0] && variants[0].type === 2) ? variants[0].value : "";
     if (funcName !== "OnSendToServer") return data;
 
     logger.info(`[${session.clientId}] Intercepted OnSendToServer`);
@@ -476,11 +485,13 @@ class GrowtopiaProxy {
     let realUser = 0;
     let realAddress = null;
     let addressFull = "127.0.0.1|0|";
+    // Preserve original variant types for port/token/user
+    let portType = 9, tokenType = 9, userType = 9;
 
     for (const v of variants) {
-      if (v.index === 1 && (v.type === 5 || v.type === 9)) realPort = v.value;
-      if (v.index === 2 && (v.type === 5 || v.type === 9)) realToken = v.value;
-      if (v.index === 3 && (v.type === 5 || v.type === 9)) realUser = v.value;
+      if (v.index === 1 && (v.type === 5 || v.type === 9)) { realPort = v.value; portType = v.type; }
+      if (v.index === 2 && (v.type === 5 || v.type === 9)) { realToken = v.value; tokenType = v.type; }
+      if (v.index === 3 && (v.type === 5 || v.type === 9)) { realUser = v.value; userType = v.type; }
       if (v.index === 4 && v.type === 2) {
         addressFull = v.value;
         realAddress = addressFull.split("|")[0];
@@ -489,6 +500,7 @@ class GrowtopiaProxy {
 
     if (realAddress) {
       logger.info(`[${session.clientId}] Sub-server redirect: ${realAddress}:${realPort}`);
+      logger.info(`[${session.clientId}] Token=${realToken} User=${realUser} Addr=${addressFull}`);
       this.pendingServerQueue.push({ host: realAddress, port: realPort });
     }
 
@@ -500,9 +512,9 @@ class GrowtopiaProxy {
 
     return PacketHandler.buildVariantPacket([
       { type: 2, value: "OnSendToServer" },
-      { type: 9, value: config.proxy.port },
-      { type: 9, value: realToken },
-      { type: 9, value: realUser },
+      { type: portType, value: config.proxy.port },
+      { type: tokenType, value: realToken },
+      { type: userType, value: realUser },
       { type: 2, value: rewrittenAddr },
     ], -1, 0);
   }
@@ -604,17 +616,17 @@ class GrowtopiaProxy {
 
     if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
 
-    // Disconnect both peers
+    // Disconnect both peers — use disconnectNow to notify remote side
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
-        peer.reset(this.outgoingClient.host);
+        peer.disconnectNow(this.outgoingClient.host, 0);
       } catch (e) {}
     }
     if (this.session.clientNetID !== null) {
       try {
         const peer = this.serverClient.host.getPeer(this.session.clientNetID);
-        peer.reset(this.serverClient.host);
+        peer.disconnectNow(this.serverClient.host, 0);
       } catch (e) {}
     }
 
