@@ -32,6 +32,7 @@ const crypto = require("crypto");
 const config = require("./config/config");
 const PacketHandler = require("./handlers/PacketHandler");
 const CommandHandler = require("./handlers/CommandHandler");
+const MenuHandler = require("./handlers/MenuHandler");
 const Logger = require("./utils/Logger");
 const LoginServer = require("./utils/LoginServer");
 const GameLauncher = require("./utils/GameLauncher");
@@ -49,6 +50,7 @@ class GrowtopiaProxy {
     this.session = null;         // Current active session
     this.packetHandler = new PacketHandler();
     this.commandHandler = new CommandHandler(this);
+    this.menuHandler = new MenuHandler(this);
     this.gameEventLogger = new GameEventLogger();
     this.loginServer = null;       // set after construction
     // Queue of pending sub-server redirects (survives session teardown).
@@ -497,6 +499,21 @@ class GrowtopiaProxy {
         logger.info(`[${session.clientId}] ✓ Login packet received — processing MAC spoof...`);
       }
       return this.spoofLoginInfo(session, data);
+    }
+
+    // Type 3 dialog_return interception — check if this is a proxy dialog response
+    if (msgType === 3) {
+      const rawText = data.toString("utf8", 4, Math.min(data.length, 4096)).replace(/\0+$/, "");
+      if (rawText.includes("action|dialog_return")) {
+        const pairs = {};
+        for (const line of rawText.split("\n")) {
+          const sep = line.indexOf("|");
+          if (sep !== -1) pairs[line.substring(0, sep).trim()] = line.substring(sep + 1).trim();
+        }
+        if (this.menuHandler.handleDialogReturn(session.clientId, pairs)) {
+          return null; // consumed by proxy — don't forward to server
+        }
+      }
     }
 
     // Type 4 = TANK — log tile/item events

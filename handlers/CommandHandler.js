@@ -97,6 +97,10 @@ class CommandHandler {
 
   _dispatch(clientId, command, args) {
     switch (command) {
+      // ─── Group 0: UI Menu ───
+      case "menu":
+      case "m":       return this.cmdMenu(clientId);
+
       // ─── Group 1: Core System & Config ───
       case "proxy":   return this.cmdProxy(clientId);
       case "keep":    return this.cmdKeep(clientId);
@@ -231,9 +235,16 @@ class CommandHandler {
   // 🏗️ FOUNDATION: State & Configuration
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+  cmdMenu(clientId) {
+    this.proxy.menuHandler.showMainMenu(clientId);
+    return { handled: true, command: "menu" };
+  }
+
   cmdProxy(clientId) {
     this.sendChat(clientId,
       "`4[`#dqymon-proxy`4]`` `wv1.0`` — Full Command Reference\n" +
+      "\n" +
+      "`w📋 /menu`` — Open interactive UI panel\n" +
       "\n" +
       "`w🏗️ Core System``\n" +
       "`5/help`` /`5proxy`` /`5keep`` /`5settings`` /`5logs`` /`5clear`` /`5ping`` /`5stats``\n" +
@@ -1232,6 +1243,7 @@ class CommandHandler {
     this.sendChat(clientId,
       "`4[`#dqymon-proxy`4]`` `wv1.0`` — Quick Help\n" +
       "\n" +
+      "`w/menu`` — ⭐ Open interactive UI panel\n" +
       "`w/proxy`` — Full command list (80+ commands)\n" +
       "`w/settings`` — View settings  `w/server`` — Server info\n" +
       "`w/players`` — Player list  `w/find`` — Find player\n" +
