@@ -440,7 +440,7 @@ class GrowtopiaProxy {
       if (text.startsWith(prefix)) {
         cmdText = text;
       } else {
-        const textMatch = text.match(/\|text\|(.+)/);
+        const textMatch = text.match(/(?:^|\n)\|?text\|(.+)/);
         if (textMatch && textMatch[1].startsWith(prefix)) {
           cmdText = textMatch[1];
         }
