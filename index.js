@@ -417,25 +417,14 @@ class GrowtopiaProxy {
 
     const msgType = data.readUInt32LE(0);
 
-    // Type 2 = login info — spoof device fingerprints
-    if (msgType === 2) {
-      if (!session.loginReceived) {
-        session.loginReceived = true;
-        logger.info(`[${session.clientId}] ✓ Login packet received — processing MAC spoof...`);
-      }
-      return this.spoofLoginInfo(session, data);
-    }
-
-    // Type 3 = action/text — log actions and check commands
-    if (msgType === 3) {
+    // ── Proxy command interception (runs on BOTH type 2 and type 3) ──
+    // GT sends chat as type 3 normally, but on sub-server connections it
+    // can arrive as type 2. Check both packet types for proxy commands.
+    if (msgType === 2 || msgType === 3) {
       const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
       const prefix = config.commands.prefix;
 
-      // Log the client action (world join, drop, chat, etc.)
-      this.gameEventLogger.processClientAction(text);
-
-      // Check for proxy commands — extract command text from either
-      // plain "/cmd" or GT action format "action|input\ntext|/cmd"
+      // Extract command text from "action|input\ntext|/cmd" or plain "/cmd"
       let cmdText = null;
       if (text.startsWith(prefix)) {
         cmdText = text;
@@ -450,10 +439,23 @@ class GrowtopiaProxy {
         const result = this.commandHandler.execute(session.clientId, cmdText);
         if (result.handled) {
           logger.info(`[${session.clientId}] Command executed: ${result.command}`);
-          // Block command from reaching server — return null to suppress
           return null;
         }
       }
+
+      // If type 3, log client action (world join, chat, etc.)
+      if (msgType === 3) {
+        this.gameEventLogger.processClientAction(text);
+      }
+    }
+
+    // Type 2 = login info — spoof device fingerprints
+    if (msgType === 2) {
+      if (!session.loginReceived) {
+        session.loginReceived = true;
+        logger.info(`[${session.clientId}] ✓ Login packet received — processing MAC spoof...`);
+      }
+      return this.spoofLoginInfo(session, data);
     }
 
     // Type 4 = TANK — log tile/item events
