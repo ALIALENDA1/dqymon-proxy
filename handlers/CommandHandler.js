@@ -39,18 +39,56 @@ class CommandHandler {
       return { handled: false };
     }
 
-    const command = commandMatch[1].toLowerCase();
-    const args = commandMatch[2].trim().split(/\s+/).filter(Boolean);
+    let command = commandMatch[1].toLowerCase();
+    let args = commandMatch[2].trim().split(/\s+/).filter(Boolean);
 
-    this.logger.info(`[${clientId}] Command: /${command} ${args.join(" ")}`);
-
-    // Save last command for /re
-    if (command !== "re") {
-      this.store.set("lastCommand", `/${command} ${args.join(" ")}`.trim());
-      this.store.save();
+    // Type 2 binary packets may append a junk/padding byte to the last
+    // token. Try the command as-is first; if it doesn't match any known
+    // command, retry with the last character stripped from the appropriate
+    // token (command name if no args, last arg otherwise).
+    const result = this._dispatch(clientId, command, args);
+    if (result) {
+      this.logger.info(`[${clientId}] Command: /${command} ${args.join(" ")}`);
+      if (command !== "re") {
+        this.store.set("lastCommand", `/${command} ${args.join(" ")}`.trim());
+        this.store.save();
+      }
+      return result;
     }
 
-    // ─── Foundation: State & Configuration ───
+    // Retry with last char stripped (padding byte cleanup)
+    if (args.length > 0) {
+      const lastArg = args[args.length - 1];
+      if (lastArg.length > 1) {
+        const cleanArgs = [...args];
+        cleanArgs[cleanArgs.length - 1] = lastArg.slice(0, -1);
+        const retryResult = this._dispatch(clientId, command, cleanArgs);
+        if (retryResult) {
+          this.logger.info(`[${clientId}] Command (cleaned arg): /${command} ${cleanArgs.join(" ")}`);
+          if (command !== "re") {
+            this.store.set("lastCommand", `/${command} ${cleanArgs.join(" ")}`.trim());
+            this.store.save();
+          }
+          return retryResult;
+        }
+      }
+    } else if (command.length > 1) {
+      const cleanCmd = command.slice(0, -1);
+      const retryResult = this._dispatch(clientId, cleanCmd, args);
+      if (retryResult) {
+        this.logger.info(`[${clientId}] Command (cleaned cmd): /${cleanCmd}`);
+        if (cleanCmd !== "re") {
+          this.store.set("lastCommand", `/${cleanCmd}`.trim());
+          this.store.save();
+        }
+        return retryResult;
+      }
+    }
+
+    return { handled: false };
+  }
+
+  _dispatch(clientId, command, args) {
     switch (command) {
       case "proxy":   return this.cmdProxy(clientId);
       case "keep":    return this.cmdKeep(clientId);
@@ -114,7 +152,7 @@ class CommandHandler {
       case "replace":  return this.cmdReplace(clientId, args);
 
       case "help":     return this.cmdHelp(clientId);
-      default:         return { handled: false };
+      default:         return null;
     }
   }
 

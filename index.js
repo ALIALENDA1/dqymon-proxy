@@ -425,40 +425,37 @@ class GrowtopiaProxy {
       let cmdText = null;
 
       if (msgType === 2) {
-        // Type 2 = binary login-format packet. The GT client appends a
-        // padding/hash byte after each field value before the \n separator.
-        // Work with raw buffer bytes to find "text|" and strip that byte.
+        // Type 2 = binary login-format. Find "text|" in raw bytes and
+        // extract the value. Hex-dump the area for debugging.
         const rawBytes = data.slice(4);
+        const textMarker = Buffer.from("text|");
+        const tIdx = rawBytes.indexOf(textMarker);
 
-        // Find "\ntext|" or "text|" at position 0
-        const marker1 = Buffer.from("\ntext|");
-        const marker2 = Buffer.from("text|");
-        let valStart = -1;
-        let idx = rawBytes.indexOf(marker1);
-        if (idx !== -1) {
-          valStart = idx + marker1.length;
-        } else if (rawBytes.indexOf(marker2) === 0) {
-          valStart = marker2.length;
-        }
+        if (tIdx !== -1) {
+          // Hex dump for debugging the exact byte pattern
+          const dumpStart = tIdx;
+          const dumpEnd = Math.min(tIdx + 40, rawBytes.length);
+          const hexDump = Array.from(rawBytes.slice(dumpStart, dumpEnd))
+            .map(b => b.toString(16).padStart(2, "0")).join(" ");
+          const asciiDump = Array.from(rawBytes.slice(dumpStart, dumpEnd))
+            .map(b => (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) : ".").join("");
+          logger.info(`[${session.clientId}] HEX text area: ${hexDump}`);
+          logger.info(`[${session.clientId}] ASCII text area: ${asciiDump}`);
 
-        if (valStart !== -1) {
-          // Find the next \n (0x0A) or \0 (0x00) after the value start
-          let lineEnd = -1;
-          for (let i = valStart; i < rawBytes.length; i++) {
-            if (rawBytes[i] === 0x0A || rawBytes[i] === 0x00) {
-              lineEnd = i;
-              break;
-            }
+          const valStart = tIdx + textMarker.length;
+          // Read until we hit a \n (0x0A) or \0 (0x00) — the field separator
+          let valEnd = valStart;
+          while (valEnd < rawBytes.length && rawBytes[valEnd] !== 0x0A && rawBytes[valEnd] !== 0x00) {
+            valEnd++;
           }
-          if (lineEnd === -1) lineEnd = rawBytes.length;
+          const rawVal = rawBytes.toString("utf8", valStart, valEnd);
+          logger.info(`[${session.clientId}] Type2 raw text value: "${rawVal}" (${valEnd - valStart} bytes)`);
 
-          // Strip the last byte (GT client's padding/hash byte)
-          const valEnd = lineEnd > valStart + 1 ? lineEnd - 1 : lineEnd;
-          const val = rawBytes.toString("utf8", valStart, valEnd);
-          logger.info(`[${session.clientId}] Type2 text field: "${val}" (raw ${lineEnd - valStart}b, stripped to ${valEnd - valStart}b)`);
-
-          if (val.startsWith(prefix)) {
-            cmdText = val;
+          // The command text is the raw value — any trailing junk byte will
+          // be part of the match but won't affect command name extraction
+          // since the switch/case matches the first word only
+          if (rawVal.startsWith(prefix)) {
+            cmdText = rawVal;
           }
         }
       } else {
