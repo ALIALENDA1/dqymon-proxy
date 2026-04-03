@@ -278,6 +278,9 @@ class GrowtopiaProxy {
     // Inspect and possibly modify GT payload (MAC spoofing, command detection)
     const modified = this.handleClientPayload(this.session, data);
 
+    // null = command was handled locally, don't forward to server
+    if (modified === null) return;
+
     // Forward to GT server
     if (this.session.connected && this.session.serverNetID !== null) {
       this.outgoingClient.send(this.session.serverNetID, ch, modified);
@@ -388,10 +391,24 @@ class GrowtopiaProxy {
       // Log the client action (world join, drop, chat, etc.)
       this.gameEventLogger.processClientAction(text);
 
-      if (text.startsWith(prefix) || text.includes(`|text|${prefix}`)) {
-        const result = this.commandHandler.execute(session.clientId, text);
+      // Check for proxy commands — extract command text from either
+      // plain "/cmd" or GT action format "action|input\ntext|/cmd"
+      let cmdText = null;
+      if (text.startsWith(prefix)) {
+        cmdText = text;
+      } else {
+        const textMatch = text.match(/\|text\|(.+)/);
+        if (textMatch && textMatch[1].startsWith(prefix)) {
+          cmdText = textMatch[1];
+        }
+      }
+
+      if (cmdText) {
+        const result = this.commandHandler.execute(session.clientId, cmdText);
         if (result.handled) {
           logger.info(`[${session.clientId}] Command executed: ${result.command}`);
+          // Block command from reaching server — return null to suppress
+          return null;
         }
       }
     }

@@ -22,10 +22,10 @@ module.exports = {
 
   // Cheat Settings
   cheats: {
-    freeDL: true,
-    freeOutfit: true,
-    warpAnywhere: true,
-    freePlace: false,
+    // All features are designed to be safe:
+    // - /dropdl sends a real drop action (server-validated)
+    // - /warp sends a real join_request (server-validated)
+    // - /outfit is client-side only (visual, not sent to server)
   },
 
   // Device Spoofing — modify device fingerprints in login packets
