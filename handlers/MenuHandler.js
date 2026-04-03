@@ -48,6 +48,18 @@ class MenuHandler {
       case "proxy_social":      return this._onSocialPanel(clientId, buttonClicked, pairs);
       case "proxy_visual":      return this._onVisualPanel(clientId, buttonClicked, pairs);
       case "proxy_settings":    return this._onSettingsPanel(clientId, buttonClicked, pairs);
+      // Picker sub-dialogs
+      case "proxy_weather":     return this._onWeatherPicker(clientId, buttonClicked, pairs);
+      case "proxy_skin":        return this._onSkinPicker(clientId, buttonClicked, pairs);
+      case "proxy_flag":        return this._onFlagPicker(clientId, buttonClicked, pairs);
+      case "proxy_zoom":        return this._onZoomPicker(clientId, buttonClicked, pairs);
+      case "proxy_outfit":      return this._onOutfitEditor(clientId, buttonClicked, pairs);
+      case "proxy_drop":        return this._onDropPicker(clientId, buttonClicked, pairs);
+      case "proxy_lock":        return this._onLockPicker(clientId, buttonClicked, pairs);
+      case "proxy_equip":       return this._onEquipPicker(clientId, buttonClicked, pairs);
+      case "proxy_trash_dlg":   return this._onTrashPicker(clientId, buttonClicked, pairs);
+      case "proxy_buy_dlg":     return this._onBuyPicker(clientId, buttonClicked, pairs);
+      case "proxy_fastvend_dlg":return this._onFastvendPicker(clientId, buttonClicked, pairs);
       case "proxy_warp":        return this._onWarpInput(clientId, buttonClicked, pairs);
       case "proxy_tax":         return this._onTaxCalc(clientId, buttonClicked, pairs);
       case "proxy_msg":         return this._onMsgInput(clientId, buttonClicked, pairs);
@@ -222,6 +234,13 @@ class MenuHandler {
       .addButtonWithIcon("do_backpack", "\`wBackpack\`\` Inventory list", 6, "staticBlueFrame")
       .addButtonWithIcon("do_upgrade", "\`wUpgrade\`\` Buy backpack slot", 1424, "staticBlueFrame")
       .addSpacer(true)
+      .addButtonWithIcon("open_drop", "\`w\u2B07 Drop Picker\`\` Drop locks with chooser", 242, "staticBlueFrame")
+      .addButtonWithIcon("open_lock", "\`w\uD83D\uDD12 Lock Placer\`\` Place lock at feet", 202, "staticBlueFrame")
+      .addButtonWithIcon("open_equip", "\`w\uD83D\uDC55 Equip/Unequip\`\` Wear or remove items", 4994, "staticBlueFrame")
+      .addButtonWithIcon("open_buy", "\`w\uD83D\uDED2 Buy Item\`\` Buy from store", 1424, "staticBlueFrame")
+      .addButtonWithIcon("open_trash", "\`w\uD83D\uDDD1 Trash Item\`\` Delete from inventory", 5638, "staticBlueFrame")
+      .addButtonWithIcon("open_fastvend", "\`w\u26A1 Fast Vend\`\` Quick buy/sell", 3832, "staticBlueFrame")
+      .addSpacer(true)
       .addSmallText("`wTax Calculator``")
       .addTextInput("tax_amount", "WL Amount:", "", 10)
       .addButton("do_calc", "`w\uD83D\uDCCA Calculate``")
@@ -298,16 +317,13 @@ class MenuHandler {
       .addButtonWithIcon("do_mod", "\`6@Mod\`\` Moderator visual", 5638, "staticBlueFrame")
       .addButtonWithIcon("do_dev", "\`bDev\`\` Developer visual", 5638, "staticBlueFrame")
       .addButtonWithIcon("do_invis", isInvis ? "\`2Visible\`\` Turn visible" : "\`5Invisible\`\` Turn invisible", 5816, "staticBlueFrame")
-      .addButtonWithIcon("do_night", "\`5Night\`\` Dark weather", 3040, "staticBlueFrame")
       .addButtonWithIcon("do_fakeban", "\`4Fake Ban\`\` Show ban overlay", 5638, "staticBlueFrame")
       .addSpacer(true)
-      .addSmallText("`wWeather ID:``")
-      .addTextInput("weather_id", "Weather:", "0", 5)
-      .addButton("do_weather", "`w\u2600\uFE0F Set Weather``")
-      .addSpacer(true)
-      .addSmallText("`wZoom Level (1-10):``")
-      .addTextInput("zoom_level", "Zoom:", "5", 3)
-      .addButton("do_zoom", "`w\uD83D\uDD0D Set Zoom``")
+      .addButtonWithIcon("open_weather", "\`w\u2600\uFE0F Weather Picker\`\` Choose weather effect", 3040, "staticBlueFrame")
+      .addButtonWithIcon("open_zoom", "\`w\uD83D\uDD0D Zoom Picker\`\` Set camera zoom level", 5814, "staticBlueFrame")
+      .addButtonWithIcon("open_skin", "\`w\uD83C\uDFA8 Skin Color\`\` Change skin color", 4818, "staticBlueFrame")
+      .addButtonWithIcon("open_flag", "\`w\uD83C\uDFF3 Flag Picker\`\` Change country flag", 3002, "staticBlueFrame")
+      .addButtonWithIcon("open_outfit", "\`w\uD83D\uDC55 Outfit Editor\`\` Change clothing slots", 4994, "staticBlueFrame")
       .addSpacer(true)
       .addButton("back", "`o\u25C0 Back``")
       .endDialog("close", "", "Close")
@@ -346,6 +362,263 @@ class MenuHandler {
       .build();
 
     this.showDialog(clientId, dlg);
+  }
+
+  // ── Picker Sub-Dialogs ──────────────────────────────────────────────
+
+  _showWeatherPicker(clientId) {
+    const weathers = [
+      [0, "None"], [1, "Rain"], [2, "Sunny"], [3, "Wind"], [4, "Mars"],
+      [5, "Toxic"], [6, "Heatwave"], [7, "Meteor"], [8, "Snow"], [9, "Harvest"],
+      [10, "Nether"], [11, "Comet"], [12, "Holiday"],
+      [18, "Rayman"], [19, "Love"], [20, "St.Patrick"], [21, "Pineapple"],
+      [22, "Alien"], [23, "Carnival"], [24, "Summer"],
+    ];
+    const dlg = new DialogBuilder("proxy_weather")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\u2600\uFE0F Weather Picker``", 3040)
+      .addSmallText("Select a weather effect (client-side only)");
+
+    for (const [id, name] of weathers) {
+      dlg.addButton(`w_${id}`, `\`w${name}\`\` (${id})`);
+    }
+
+    dlg.addSpacer(true)
+      .addSmallText("`wCustom ID:``")
+      .addTextInput("custom_id", "Weather ID:", "", 5)
+      .addButton("w_custom", "`w\u2714 Apply Custom``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Visual``")
+      .endDialog("w_custom", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showSkinPicker(clientId) {
+    const skins = [
+      [0x78787878, "Default"],
+      [0xFFF0D0B0, "Pale"],
+      [0xFFC89678, "Light"],
+      [0xFFA87858, "Medium"],
+      [0xFF886838, "Tan"],
+      [0xFF583818, "Dark"],
+      [0xFF382808, "Brown"],
+      [0x10FFFFFF, "Ghost"],
+      [0xFFFF0000, "Red"],
+      [0xFF00FF00, "Green"],
+      [0xFF0000FF, "Blue"],
+      [0xFFFFFF00, "Yellow"],
+      [0xFFFF69B4, "Pink"],
+      [0xFFFFFFFF, "White"],
+      [0xFF000000, "Black"],
+    ];
+    const dlg = new DialogBuilder("proxy_skin")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83C\uDFA8 Skin Color``", 4818)
+      .addSmallText("Change your skin color (client-side only)");
+
+    for (const [id, name] of skins) {
+      dlg.addButton(`s_${id}`, `\`w${name}\`\``);
+    }
+
+    dlg.addSpacer(true)
+      .addSmallText("`wCustom Color ID:``")
+      .addTextInput("custom_skin", "Color ID:", "", 12)
+      .addButton("s_custom", "`w\u2714 Apply Custom``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Visual``")
+      .endDialog("s_custom", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showFlagPicker(clientId) {
+    const flags = [
+      [164, "US"], [162, "UK"], [99, "Japan"], [114, "Korea"], [26, "Brazil"],
+      [57, "France"], [53, "Finland"], [45, "Egypt"], [66, "Germany"],
+      [86, "India"], [83, "Indonesia"], [96, "Italy"], [136, "Netherlands"],
+      [143, "Philippines"], [149, "Russia"], [159, "Thailand"], [161, "Turkey"],
+      [31, "Canada"], [8, "Australia"], [120, "Mexico"], [38, "China"],
+      [154, "Spain"], [144, "Poland"], [100, "Jordan"], [202, "Palestine"],
+    ];
+    const dlg = new DialogBuilder("proxy_flag")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83C\uDFF3 Flag Picker``", 3002)
+      .addSmallText("Change your country flag (client-side only)");
+
+    for (const [id, name] of flags) {
+      dlg.addButton(`f_${id}`, `\`w${name}\`\` (${id})`);
+    }
+
+    dlg.addSpacer(true)
+      .addSmallText("`wCustom Flag ID:``")
+      .addTextInput("custom_flag", "Flag ID:", "", 5)
+      .addButton("f_custom", "`w\u2714 Apply Custom``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Visual``")
+      .endDialog("f_custom", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showZoomPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_zoom")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDD0D Zoom Picker``", 5814)
+      .addSmallText("Set camera zoom level (1 = closest, 10 = farthest)");
+
+    for (let i = 1; i <= 10; i++) {
+      const label = i === 5 ? `\`2${i} (Default)\`\`` : `\`w${i}\`\``;
+      dlg.addButton(`z_${i}`, label);
+    }
+
+    dlg.addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Visual``")
+      .endDialog("close", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showOutfitEditor(clientId) {
+    const slots = [
+      ["hat", "Hat"], ["shirt", "Shirt"], ["pants", "Pants"],
+      ["shoes", "Shoes"], ["face", "Face Item"], ["hand", "Hand"],
+      ["back_item", "Back"], ["hair", "Hair"], ["neck", "Necklace"],
+    ];
+    const dlg = new DialogBuilder("proxy_outfit")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDC55 Outfit Editor``", 4994)
+      .addSmallText("Enter item IDs for each slot (0 = empty, client-side only)")
+      .addSpacer(true);
+
+    for (const [id, label] of slots) {
+      dlg.addTextInput(id, `${label}:`, "0", 6);
+    }
+
+    dlg.addSpacer(true)
+      .addButton("do_apply", "`2\u2714 Apply Outfit``")
+      .addButton("do_clear", "`4\u2716 Clear All``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Visual``")
+      .endDialog("do_apply", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showDropPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_drop")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\u2B07 Drop Picker``", 242)
+      .addSmallText("Choose lock type and amount to drop")
+      .addSpacer(true)
+      .addTextInput("drop_amount", "Amount (max 200):", "1", 5)
+      .addSpacer(true)
+      .addButtonWithIcon("do_drop_wl", "\`w\u2B07 Drop World Locks\`\`", 242, "staticBlueFrame")
+      .addButtonWithIcon("do_drop_dl", "\`w\u2B07 Drop Diamond Locks\`\`", 1796, "staticBlueFrame")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("close", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showLockPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_lock")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDD12 Lock Placer``", 202)
+      .addSmallText("Place a lock at your feet (requires world admin)")
+      .addSpacer(true)
+      .addButtonWithIcon("l_sl", "\`wSmall Lock\`\`", 202, "staticBlueFrame")
+      .addButtonWithIcon("l_bl", "\`wBig Lock\`\`", 204, "staticBlueFrame")
+      .addButtonWithIcon("l_wl", "\`wWorld Lock\`\`", 242, "staticBlueFrame")
+      .addButtonWithIcon("l_dl", "\`wDiamond Lock\`\`", 1796, "staticBlueFrame")
+      .addButtonWithIcon("l_bgl", "\`wBlue Gem Lock\`\`", 7188, "staticBlueFrame")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("close", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showEquipPicker(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    const dlg = new DialogBuilder("proxy_equip")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDC55 Equip / Unequip``", 4994)
+      .addSmallText("Wear or remove items by ID");
+
+    if (gel.inventory.size > 0) {
+      dlg.addSpacer(true).addSmallText("`wInventory (top 20):``");
+      let count = 0;
+      for (const [itemId, qty] of gel.inventory) {
+        if (count >= 20) break;
+        dlg.addButtonWithIcon(`eq_${itemId}`, `\`wEquip\`\` ID:${itemId} (x${qty})`, itemId, "staticBlueFrame");
+        count++;
+      }
+    }
+
+    dlg.addSpacer(true)
+      .addSmallText("`wManual:``")
+      .addTextInput("equip_id", "Item ID:", "", 6)
+      .addButton("do_equip", "`2\u2714 Equip``")
+      .addButton("do_unequip", "`4\u2716 Unequip``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("do_equip", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showTrashPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_trash_dlg")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDDD1 Trash Item``", 5638)
+      .addSmallText("Delete items from your inventory")
+      .addSpacer(true)
+      .addTextInput("trash_id", "Item ID:", "", 6)
+      .addTextInput("trash_amount", "Amount (max 200):", "1", 5)
+      .addSpacer(true)
+      .addButton("do_trash", "`4\uD83D\uDDD1 Trash``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("do_trash", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showBuyPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_buy_dlg")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\uD83D\uDED2 Buy Item``", 1424)
+      .addSmallText("Buy items from the store")
+      .addSpacer(true)
+      .addTextInput("buy_id", "Item ID:", "", 6)
+      .addTextInput("buy_amount", "Amount (max 200):", "1", 5)
+      .addSpacer(true)
+      .addButton("do_buy", "`2\uD83D\uDED2 Buy``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("do_buy", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
+  }
+
+  _showFastvendPicker(clientId) {
+    const dlg = new DialogBuilder("proxy_fastvend_dlg")
+      .setDefaultColor("`o")
+      .addLabelBig("`w\u26A1 Fast Vend``", 3832)
+      .addSmallText("Quick bulk buy or sell")
+      .addSpacer(true)
+      .addTextInput("vend_id", "Item ID:", "", 6)
+      .addTextInput("vend_qty", "Quantity (max 200):", "1", 5)
+      .addSpacer(true)
+      .addButton("do_vbuy", "`2\uD83D\uDED2 Buy``")
+      .addButton("do_vsell", "`4\uD83D\uDCB0 Sell``")
+      .addSpacer(true)
+      .addButton("back", "`o\u25C0 Back to Economy``")
+      .endDialog("close", "", "Close");
+
+    this.showDialog(clientId, dlg.build());
   }
 
   // ── Dialog Response Handlers ───────────────────────────────────────
@@ -437,11 +710,17 @@ class MenuHandler {
 
   _onEconomyPanel(clientId, btn, pairs) {
     switch (btn) {
-      case "back":          this.showMainMenu(clientId); break;
-      case "do_balance":    this._execCmd(clientId, "balance"); break;
-      case "do_backpack":   this._execCmd(clientId, "backpack"); break;
-      case "do_upgrade":    this._execCmd(clientId, "upgrade"); break;
-      case "do_daw":        this._execCmd(clientId, "daw"); break;
+      case "back":            this.showMainMenu(clientId); break;
+      case "do_balance":      this._execCmd(clientId, "balance"); break;
+      case "do_backpack":     this._execCmd(clientId, "backpack"); break;
+      case "do_upgrade":      this._execCmd(clientId, "upgrade"); break;
+      case "do_daw":          this._execCmd(clientId, "daw"); break;
+      case "open_drop":       this._showDropPicker(clientId); break;
+      case "open_lock":       this._showLockPicker(clientId); break;
+      case "open_equip":      this._showEquipPicker(clientId); break;
+      case "open_buy":        this._showBuyPicker(clientId); break;
+      case "open_trash":      this._showTrashPicker(clientId); break;
+      case "open_fastvend":   this._showFastvendPicker(clientId); break;
       case "do_calc": {
         const amount = (pairs.tax_amount || "").trim();
         if (amount && parseInt(amount) > 0) this._execCmd(clientId, `game ${amount}`);
@@ -492,22 +771,16 @@ class MenuHandler {
 
   _onVisualPanel(clientId, btn, pairs) {
     switch (btn) {
-      case "back":         this.showMainMenu(clientId); break;
-      case "do_mod":       this._execCmd(clientId, "mod"); break;
-      case "do_dev":       this._execCmd(clientId, "dev"); break;
-      case "do_invis":     this._execCmd(clientId, "invis"); break;
-      case "do_night":     this._execCmd(clientId, "night"); break;
-      case "do_fakeban":   this._execCmd(clientId, "fakeban"); break;
-      case "do_weather": {
-        const id = (pairs.weather_id || "").trim();
-        if (id !== "") this._execCmd(clientId, `weather ${id}`);
-        break;
-      }
-      case "do_zoom": {
-        const level = (pairs.zoom_level || "").trim();
-        if (level !== "") this._execCmd(clientId, `zoom ${level}`);
-        break;
-      }
+      case "back":           this.showMainMenu(clientId); break;
+      case "do_mod":         this._execCmd(clientId, "mod"); break;
+      case "do_dev":         this._execCmd(clientId, "dev"); break;
+      case "do_invis":       this._execCmd(clientId, "invis"); break;
+      case "do_fakeban":     this._execCmd(clientId, "fakeban"); break;
+      case "open_weather":   this._showWeatherPicker(clientId); break;
+      case "open_zoom":      this._showZoomPicker(clientId); break;
+      case "open_skin":      this._showSkinPicker(clientId); break;
+      case "open_flag":      this._showFlagPicker(clientId); break;
+      case "open_outfit":    this._showOutfitEditor(clientId); break;
     }
     return true;
   }
@@ -522,6 +795,159 @@ class MenuHandler {
         if (rate !== "") this._execCmd(clientId, `tax ${rate}`);
         break;
       }
+    }
+    return true;
+  }
+
+  // ── Picker Response Handlers ────────────────────────────────────────
+
+  _onWeatherPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showVisualPanel(clientId); return true; }
+    if (btn === "w_custom") {
+      const id = (pairs.custom_id || "").trim();
+      if (id !== "") this._execCmd(clientId, `weather ${id}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter a weather ID");
+      return true;
+    }
+    if (btn.startsWith("w_")) {
+      const id = btn.substring(2);
+      this._execCmd(clientId, `weather ${id}`);
+    }
+    return true;
+  }
+
+  _onSkinPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showVisualPanel(clientId); return true; }
+    if (btn === "s_custom") {
+      const id = (pairs.custom_skin || "").trim();
+      if (id !== "") this._execCmd(clientId, `skin ${id}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter a color ID");
+      return true;
+    }
+    if (btn.startsWith("s_")) {
+      const id = btn.substring(2);
+      this._execCmd(clientId, `skin ${id}`);
+    }
+    return true;
+  }
+
+  _onFlagPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showVisualPanel(clientId); return true; }
+    if (btn === "f_custom") {
+      const id = (pairs.custom_flag || "").trim();
+      if (id !== "") this._execCmd(clientId, `flag ${id}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter a flag ID");
+      return true;
+    }
+    if (btn.startsWith("f_")) {
+      const id = btn.substring(2);
+      this._execCmd(clientId, `flag ${id}`);
+    }
+    return true;
+  }
+
+  _onZoomPicker(clientId, btn) {
+    if (btn === "back") { this._showVisualPanel(clientId); return true; }
+    if (btn.startsWith("z_")) {
+      const level = btn.substring(2);
+      this._execCmd(clientId, `zoom ${level}`);
+    }
+    return true;
+  }
+
+  _onOutfitEditor(clientId, btn, pairs) {
+    if (btn === "back") { this._showVisualPanel(clientId); return true; }
+    if (btn === "do_clear") {
+      this._execCmd(clientId, "clothes 0 0 0 0 0 0 0 0 0");
+      return true;
+    }
+    if (btn === "do_apply") {
+      const hat   = (pairs.hat || "0").trim();
+      const shirt = (pairs.shirt || "0").trim();
+      const pants = (pairs.pants || "0").trim();
+      const shoes = (pairs.shoes || "0").trim();
+      const face  = (pairs.face || "0").trim();
+      const hand  = (pairs.hand || "0").trim();
+      const back  = (pairs.back_item || "0").trim();
+      const hair  = (pairs.hair || "0").trim();
+      const neck  = (pairs.neck || "0").trim();
+      this._execCmd(clientId, `clothes ${hat} ${shirt} ${pants} ${shoes} ${face} ${hand} ${back} ${hair} ${neck}`);
+    }
+    return true;
+  }
+
+  _onDropPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    const amount = (pairs.drop_amount || "1").trim();
+    if (btn === "do_drop_wl") {
+      this._execCmd(clientId, `cdrop wl ${amount}`);
+    } else if (btn === "do_drop_dl") {
+      this._execCmd(clientId, `cdrop dl ${amount}`);
+    }
+    return true;
+  }
+
+  _onLockPicker(clientId, btn) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    const lockMap = { l_sl: "sl", l_bl: "bl", l_wl: "wl", l_dl: "dl", l_bgl: "bgl" };
+    if (lockMap[btn]) {
+      this._execCmd(clientId, `lock ${lockMap[btn]}`);
+    }
+    return true;
+  }
+
+  _onEquipPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    if (btn === "do_equip") {
+      const id = (pairs.equip_id || "").trim();
+      if (id) this._execCmd(clientId, `equip ${id}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter an item ID");
+      return true;
+    }
+    if (btn === "do_unequip") {
+      const id = (pairs.equip_id || "").trim();
+      if (id) this._execCmd(clientId, `unequip ${id}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter an item ID");
+      return true;
+    }
+    if (btn.startsWith("eq_")) {
+      const id = btn.substring(3);
+      this._execCmd(clientId, `equip ${id}`);
+    }
+    return true;
+  }
+
+  _onTrashPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    if (btn === "do_trash") {
+      const id = (pairs.trash_id || "").trim();
+      const amount = (pairs.trash_amount || "1").trim();
+      if (id) this._execCmd(clientId, `trash ${id} ${amount}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter an item ID");
+    }
+    return true;
+  }
+
+  _onBuyPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    if (btn === "do_buy") {
+      const id = (pairs.buy_id || "").trim();
+      const amount = (pairs.buy_amount || "1").trim();
+      if (id) this._execCmd(clientId, `buy ${id} ${amount}`);
+      else this._sendChat(clientId, "`4[Proxy]`` Enter an item ID");
+    }
+    return true;
+  }
+
+  _onFastvendPicker(clientId, btn, pairs) {
+    if (btn === "back") { this._showEconomyPanel(clientId); return true; }
+    const id = (pairs.vend_id || "").trim();
+    const qty = (pairs.vend_qty || "1").trim();
+    if (!id) { this._sendChat(clientId, "`4[Proxy]`` Enter an item ID"); return true; }
+    if (btn === "do_vbuy") {
+      this._execCmd(clientId, `fastvend buy ${id} ${qty}`);
+    } else if (btn === "do_vsell") {
+      this._execCmd(clientId, `fastvend sell ${id} ${qty}`);
     }
     return true;
   }
