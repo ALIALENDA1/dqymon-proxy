@@ -425,25 +425,40 @@ class GrowtopiaProxy {
       let cmdText = null;
 
       if (msgType === 2) {
-        // Type 2 = binary login-format packet. Use the same exec /g parser
-        // as spoofLoginInfo so we get a clean "text" value without junk bytes.
-        const rawText = data.slice(4).toString("latin1")
-          .replace(/[^\x09\x0a\x20-\x7e]/g, "\n");
-        const keyRegex = /([a-zA-Z_]\w*)\|/g;
-        const keyPositions = [];
-        let m;
-        while ((m = keyRegex.exec(rawText)) !== null) {
-          keyPositions.push({ key: m[1], valueStart: m.index + m[0].length });
+        // Type 2 = binary login-format packet. The GT client appends a
+        // padding/hash byte after each field value before the \n separator.
+        // Work with raw buffer bytes to find "text|" and strip that byte.
+        const rawBytes = data.slice(4);
+
+        // Find "\ntext|" or "text|" at position 0
+        const marker1 = Buffer.from("\ntext|");
+        const marker2 = Buffer.from("text|");
+        let valStart = -1;
+        let idx = rawBytes.indexOf(marker1);
+        if (idx !== -1) {
+          valStart = idx + marker1.length;
+        } else if (rawBytes.indexOf(marker2) === 0) {
+          valStart = marker2.length;
         }
-        for (let i = 0; i < keyPositions.length; i++) {
-          const curr = keyPositions[i];
-          if (curr.key === "text") {
-            const nextKeyStart = (i + 1 < keyPositions.length) ? keyPositions[i + 1].valueStart - keyPositions[i + 1].key.length - 1 : rawText.length;
-            const val = rawText.substring(curr.valueStart, nextKeyStart).replace(/[\n]+$/, "");
-            if (val.startsWith(prefix)) {
-              cmdText = val;
+
+        if (valStart !== -1) {
+          // Find the next \n (0x0A) or \0 (0x00) after the value start
+          let lineEnd = -1;
+          for (let i = valStart; i < rawBytes.length; i++) {
+            if (rawBytes[i] === 0x0A || rawBytes[i] === 0x00) {
+              lineEnd = i;
+              break;
             }
-            break;
+          }
+          if (lineEnd === -1) lineEnd = rawBytes.length;
+
+          // Strip the last byte (GT client's padding/hash byte)
+          const valEnd = lineEnd > valStart + 1 ? lineEnd - 1 : lineEnd;
+          const val = rawBytes.toString("utf8", valStart, valEnd);
+          logger.info(`[${session.clientId}] Type2 text field: "${val}" (raw ${lineEnd - valStart}b, stripped to ${valEnd - valStart}b)`);
+
+          if (val.startsWith(prefix)) {
+            cmdText = val;
           }
         }
       } else {
