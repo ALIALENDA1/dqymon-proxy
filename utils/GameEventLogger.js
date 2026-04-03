@@ -12,9 +12,18 @@ class GameEventLogger {
     this.currentWorld = "";
     this.playerName = "";
     this.localNetID = -1;
-    this.players = new Map(); // netID → { name, country }
+    this.players = new Map(); // netID → { name, country, level, guild, mstate, invis }
     this.lastGems = undefined;  // last known gem count
     this.onWorldJoin = null;    // callback for world history tracking
+
+    // ── Extended tracking ──
+    this.playerPositions = new Map(); // netID → { x, y }
+    this.worldOwner = "";             // world lock owner name
+    this.inventory = new Map();       // itemID → count
+    this.droppedItems = new Map();    // uid → { itemID, x, y, count }
+    this.joinHistory = [];            // last netIDs to enter room
+    this.chatHistory = [];            // last chat messages
+    this.lastLoginResponse = null;    // raw login response data
   }
 
   // ── Color stripping ──────────────────────────────────────────────
@@ -109,6 +118,16 @@ class GameEventLogger {
     const clean = this.stripColors(raw);
     if (!clean.trim()) return;
 
+    // Store in chat history
+    this.addChatHistory(clean);
+
+    // Try to detect world owner from lock messages
+    const ownerMatch = clean.match(/`5(.+?)(?:``)?\s+(?:of|'s)\s+World/i)
+      || clean.match(/World locked by\s+(.+)/i);
+    if (ownerMatch) {
+      this.worldOwner = this.stripColors(ownerMatch[1]);
+    }
+
     // Classify the message
     const lower = clean.toLowerCase();
     if (lower.includes("dropped")) {
@@ -144,6 +163,20 @@ class GameEventLogger {
     const userID = pairs.userID || "";
     const level = pairs.level || "";
     const world = pairs.world || "";
+    const invis = pairs.invis === "1";
+    const mstate = parseInt(pairs.mstate) || 0;
+    const guild = pairs.guild || "";
+
+    // Track position from spawn
+    if (pairs.posXY) {
+      const posparts = pairs.posXY.split("|");
+      if (posparts.length >= 2) {
+        this.playerPositions.set(netID, {
+          x: parseFloat(posparts[0]) || 0,
+          y: parseFloat(posparts[1]) || 0,
+        });
+      }
+    }
 
     if (isLocal) {
       this.playerName = name;
@@ -155,8 +188,14 @@ class GameEventLogger {
         `${level ? ` (lvl ${level})` : ""}`
       );
     } else {
-      this.players.set(netID, { name, country: pairs.country || "" });
-      this.logger.game(`[PLAYER] ${name} appeared${level ? ` (lvl ${level})` : ""}`);
+      this.players.set(netID, {
+        name, country: pairs.country || "", level, guild, mstate, invis,
+        userID,
+      });
+      // Track join history
+      this.joinHistory.push({ netID, name, time: Date.now() });
+      if (this.joinHistory.length > 50) this.joinHistory.splice(0, this.joinHistory.length - 50);
+      this.logger.game(`[PLAYER] ${name} appeared${level ? ` (lvl ${level})` : ""}${invis ? " (INVISIBLE)" : ""}${mstate >= 2 ? " (MOD)" : ""}`);
     }
   }
 
@@ -188,6 +227,7 @@ class GameEventLogger {
     if (player) {
       this.logger.game(`[LEAVE] ${player.name} left`);
       this.players.delete(netID);
+      this.playerPositions.delete(netID);
     }
   }
 
@@ -295,8 +335,20 @@ class GameEventLogger {
    * @param {Buffer} payload - 56-byte tank header (+ extra data)
    */
   processTankPacket(tankType, payload) {
+    if (payload.length < 56) return;
+
+    // STATE_UPDATE (type 0) — track player positions
+    if (tankType === 0) {
+      const netID = payload.readInt32LE(4);
+      const posX = payload.readFloatLE(24);
+      const posY = payload.readFloatLE(28);
+      if (netID >= 0 && (posX !== 0 || posY !== 0)) {
+        this.playerPositions.set(netID, { x: posX, y: posY });
+      }
+    }
+
     // Tile change (item place/break)
-    if (tankType === 3 && payload.length >= 56) {
+    if (tankType === 3) {
       const itemID = payload.readUInt16LE(16);
       const tileX = payload.readInt32LE(44);
       const tileY = payload.readInt32LE(48);
@@ -304,6 +356,79 @@ class GameEventLogger {
         this.logger.debug(`[TILE] Place/break at (${tileX},${tileY}) item=${itemID}`);
       }
     }
+
+    // SEND_INVENTORY (type 10) — parse inventory from extra data
+    if (tankType === 10) {
+      const extraSize = payload.readUInt32LE(52);
+      if (extraSize > 0 && payload.length >= 56 + extraSize) {
+        this.parseInventory(payload.slice(56, 56 + extraSize));
+      }
+    }
+
+    // ITEM_CHANGE_OBJ (type 18) — track floating/dropped items
+    if (tankType === 18) {
+      const extraSize = payload.readUInt32LE(52);
+      if (extraSize > 0 && payload.length >= 56 + extraSize) {
+        this.parseDroppedItems(payload.slice(56, 56 + extraSize));
+      }
+    }
+  }
+
+  /**
+   * Parse inventory data from SEND_INVENTORY extra data.
+   */
+  parseInventory(data) {
+    try {
+      if (data.length < 7) return;
+      // Format: version(1) + backpackSize(int32) + itemCount(int16)
+      const backpackSize = data.readUInt32LE(1);
+      const itemCount = data.readUInt16LE(5);
+      this.inventory.clear();
+      let offset = 7;
+      for (let i = 0; i < itemCount && offset + 4 <= data.length; i++) {
+        const itemID = data.readUInt16LE(offset);
+        const count = data.readUInt16LE(offset + 2);
+        if (itemID > 0) this.inventory.set(itemID, count);
+        offset += 4;
+      }
+      this.logger.debug(`[INV] Parsed ${this.inventory.size} items (backpack: ${backpackSize})`);
+    } catch (e) {
+      this.logger.debug(`[INV] Parse failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Parse dropped/floating items from ITEM_CHANGE_OBJ extra data.
+   */
+  parseDroppedItems(data) {
+    try {
+      if (data.length < 16) return;
+      // Each dropped item: itemID(int16) + posX(float32) + posY(float32) + count(int16) + uid(int32)...
+      // Simplified: just count them
+      const count = Math.floor(data.length / 16);
+      this.logger.debug(`[ITEMS] Received item object data (${data.length}b, ~${count} items)`);
+    } catch (e) {
+      this.logger.debug(`[ITEMS] Parse failed: ${e.message}`);
+    }
+  }
+
+  /**
+   * Store OnConsoleMessage in chat history for /logs command.
+   */
+  addChatHistory(text) {
+    this.chatHistory.push({ time: Date.now(), text });
+    if (this.chatHistory.length > 200) this.chatHistory.splice(0, this.chatHistory.length - 200);
+  }
+
+  /**
+   * Reset world-specific state when leaving/joining worlds.
+   */
+  resetWorldState() {
+    this.players.clear();
+    this.playerPositions.clear();
+    this.droppedItems.clear();
+    this.joinHistory = [];
+    this.worldOwner = "";
   }
 
   /**

@@ -698,8 +698,9 @@ class GrowtopiaProxy {
       if (!pairOrder.includes(curr.key)) pairOrder.push(curr.key);
     }
 
-    // Log original login info
+    // Log original login info + store for /checkacc
     this.gameEventLogger.logLoginInfo(pairs);
+    this.gameEventLogger.lastLoginResponse = pairs;
 
     // Log key authentication fields for sub-server debugging
     const authFields = ["user", "token", "lmode", "UUIDToken", "doorID", "meta"];

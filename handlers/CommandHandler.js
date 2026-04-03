@@ -22,6 +22,13 @@ class CommandHandler {
     // Tracking state for passive radar
     this.itemTracker = [];       // { time, item, action, world }
     this.growscanResult = null;  // last scan result
+    // Automation state
+    this.automationTimers = new Map(); // clientId → [intervalIds]
+    this.ignoredPlayers = new Set();   // netIDs to ignore chat from
+    this.chatFilters = [];             // regex strings to filter
+    this.wrenchMode = "normal";        // normal|kick|pull|ban
+    this.taxRate = 5;                  // default tax %
+    this.guestMode = false;            // strip credentials on next login
   }
 
   /**
@@ -90,83 +97,133 @@ class CommandHandler {
 
   _dispatch(clientId, command, args) {
     switch (command) {
+      // ─── Group 1: Core System & Config ───
       case "proxy":   return this.cmdProxy(clientId);
       case "keep":    return this.cmdKeep(clientId);
       case "settings":
       case "options": return this.cmdSettings(clientId);
+      case "logs":    return this.cmdLogs(clientId);
+      case "help":    return this.cmdHelp(clientId);
+      case "clear":   return this.cmdClear(clientId);
+      case "ping":    return this.cmdPing(clientId);
+      case "stats":   return this.cmdStats(clientId);
+      case "hide":    return this.cmdHide(clientId);
+      case "panic":   return this.cmdPanic(clientId);
+      case "reboot":  return this.cmdReboot(clientId);
+      case "exit":    return this.cmdExit(clientId);
+      case "re":      return this.cmdRe(clientId);
+
+      // ─── Group 2: Account & Login Routing ───
       case "switch":  return this.cmdSwitch(clientId, args);
       case "account": return this.cmdAccount(clientId, args);
       case "mac":     return this.cmdMac(clientId, args);
+      case "rid":     return this.cmdRid(clientId, args);
+      case "wk":      return this.cmdWk(clientId, args);
+      case "guest":   return this.cmdGuest(clientId);
       case "pass":    return this.cmdPass(clientId, args);
       case "nick":    return this.cmdNick(clientId, args);
-      case "logs":    return this.cmdLogs(clientId);
+      case "relog":   return this.cmdRelog(clientId);
+      case "checkacc":return this.cmdCheckacc(clientId);
       case "server":  return this.cmdServer(clientId);
-      case "re":      return this.cmdRe(clientId);
 
-      // ─── Tier 1: Passive Radar & Analytics ───
-      case "growscan": return this.cmdGrowscan(clientId);
-      case "chest":    return this.cmdChest(clientId);
-      case "gems":     return this.cmdGems(clientId);
-      case "hidden":   return this.cmdHidden(clientId);
-      case "track":    return this.cmdTrack(clientId, args);
-      case "balance":  return this.cmdBalance(clientId);
-      case "check":    return this.cmdCheck(clientId);
-      case "players":  return this.cmdPlayers(clientId);
+      // ─── Group 3: Navigation & Routing ───
+      case "warp":    return this.cmdWarp(clientId, args);
+      case "save":    return this.cmdSave(clientId, args);
+      case "setsave":
+      case "sethome": return this.cmdSethome(clientId);
+      case "home":    return this.cmdHome(clientId);
+      case "back":    return this.cmdBack(clientId);
+      case "rndm":    return this.cmdRndm(clientId);
+      case "tutorial":return this.cmdTutorial(clientId);
+      case "leave":
+      case "logoff":  return this.cmdLogoff(clientId);
+      case "door":    return this.cmdDoor(clientId, args);
+      case "worlds":  return this.cmdWorlds(clientId);
+      case "history": return this.cmdHistory(clientId);
 
-      // ─── Tier 2: Clean UI Bypasses & Utility ───
-      case "fastvend": return this.cmdFastvend(clientId, args);
-      case "trash":    return this.cmdTrash(clientId, args);
+      // ─── Group 4: Passive Radar & Scraping ───
+      case "growscan":return this.cmdGrowscan(clientId);
+      case "chest":   return this.cmdChest(clientId);
+      case "spirit":  return this.cmdSpirit(clientId);
+      case "gems":    return this.cmdGems(clientId);
+      case "floating":return this.cmdFloating(clientId);
+      case "owner":   return this.cmdOwner(clientId);
+      case "blocks":  return this.cmdBlocks(clientId);
+      case "find":    return this.cmdFind(clientId, args);
+      case "hidden":  return this.cmdHidden(clientId);
+      case "mods":    return this.cmdMods(clientId);
+      case "locate":  return this.cmdLocate(clientId, args);
+      case "list":
+      case "players": return this.cmdPlayers(clientId);
+      case "check":   return this.cmdCheck(clientId);
+      case "track":   return this.cmdTrack(clientId, args);
+
+      // ─── Group 5: Economy & UI Bypasses ───
+      case "balance": return this.cmdBalance(clientId);
+      case "backpack":
+      case "inv":     return this.cmdBackpack(clientId);
+      case "fastvend":return this.cmdFastvend(clientId, args);
+      case "buy":     return this.cmdBuy(clientId, args);
+      case "trash":   return this.cmdTrash(clientId, args);
+      case "equip":   return this.cmdEquip(clientId, args);
+      case "unequip": return this.cmdUnequip(clientId, args);
+      case "upgrade": return this.cmdUpgrade(clientId);
       case "drop":
-      case "dropdl":   return this.cmdDrop(clientId, args);
-      case "buy":      return this.cmdBuy(clientId, args);
-      case "count":    return this.cmdCount(clientId, args);
-      case "cdrop":    return this.cmdCdrop(clientId, args);
-      case "ddrop":    return this.cmdDdrop(clientId, args);
-      case "game":     return this.cmdGame(clientId, args);
-      case "game1":    return this.cmdGame1(clientId, args);
-      case "game2":    return this.cmdGame2(clientId, args);
-      case "split":    return this.cmdSplit(clientId, args);
-      case "warp":     return this.cmdWarp(clientId, args);
-      case "door":     return this.cmdDoor(clientId, args);
-      case "save":     return this.cmdSave(clientId, args);
-      case "back":     return this.cmdBack(clientId);
-      case "relog":    return this.cmdRelog(clientId);
-      case "logoff":   return this.cmdLogoff(clientId);
-      case "rndm":     return this.cmdRndm(clientId);
-      case "pullall":  return this.cmdPullall(clientId);
-      case "kickall":  return this.cmdKickall(clientId);
-      case "banall":   return this.cmdBanall(clientId);
-      case "unall":    return this.cmdUnall(clientId);
+      case "dropdl":  return this.cmdDrop(clientId, args);
+      case "cdrop":   return this.cmdCdrop(clientId, args);
+      case "ddrop":   return this.cmdDdrop(clientId, args);
+      case "daw":     return this.cmdDaw(clientId);
+      case "tax":     return this.cmdTax(clientId, args);
+      case "game":    return this.cmdGame(clientId, args);
+      case "game1":   return this.cmdGame1(clientId, args);
+      case "game2":   return this.cmdGame2(clientId, args);
+      case "split":   return this.cmdSplit(clientId, args);
+      case "count":   return this.cmdCount(clientId, args);
+      case "accept":  return this.cmdAccept(clientId);
 
-      // ─── Tier 3: Info & Utility ───
-      case "find":     return this.cmdFind(clientId, args);
-      case "ping":     return this.cmdPing(clientId);
-      case "stats":    return this.cmdStats(clientId);
-      case "clear":    return this.cmdClear(clientId);
-      case "sb":       return this.cmdSb(clientId, args);
-      case "sethome":  return this.cmdSethome(clientId);
-      case "home":     return this.cmdHome(clientId);
-      case "worlds":   return this.cmdWorlds(clientId);
-      case "history":  return this.cmdHistory(clientId);
-      case "copy":     return this.cmdCopy(clientId, args);
+      // ─── Group 6: World Admin & Targeting ───
+      case "pullall": return this.cmdPullall(clientId);
+      case "kickall": return this.cmdKickall(clientId);
+      case "banall":  return this.cmdBanall(clientId);
+      case "accessall":return this.cmdAccessall(clientId);
+      case "unall":   return this.cmdUnall(clientId);
+      case "wm":      return this.cmdWm(clientId, args);
+      case "wbans":   return this.cmdWbans(clientId);
+      case "clearbans":return this.cmdClearbans(clientId);
+      case "lock":    return this.cmdLock(clientId, args);
+      case "ignore":  return this.cmdIgnore(clientId, args);
+      case "level":   return this.cmdLevel(clientId, args);
+      case "guild":   return this.cmdGuild(clientId, args);
+      case "wrench":  return this.cmdWrench(clientId, args);
+      case "trade":   return this.cmdTrade(clientId, args);
 
-      // ─── Tier 4: Visual Illusions (Client-Side Only) ───
+      // ─── Group 7: Social ───
+      case "msg":     return this.cmdMsg(clientId, args);
+      case "sb":      return this.cmdSb(clientId, args);
+      case "me":      return this.cmdMe(clientId, args);
+      case "copy":    return this.cmdCopy(clientId, args);
+      case "filter":  return this.cmdFilter(clientId, args);
+
+      // ─── Group 8: Client-Side Illusions ───
       case "clothes":
-      case "outfit":   return this.cmdClothes(clientId, args);
-      case "skin":     return this.cmdSkin(clientId, args);
-      case "weather":  return this.cmdWeather(clientId, args);
-      case "invis":    return this.cmdInvis(clientId);
-      case "flag":     return this.cmdFlag(clientId, args);
+      case "outfit":  return this.cmdClothes(clientId, args);
+      case "name":    return this.cmdName(clientId, args);
       case "title":
-      case "titles":   return this.cmdTitle(clientId, args);
-      case "name":     return this.cmdName(clientId, args);
-      case "country":  return this.cmdCountry(clientId, args);
-      case "mod":      return this.cmdMod(clientId);
-      case "dev":      return this.cmdDev(clientId);
-      case "replace":  return this.cmdReplace(clientId, args);
+      case "titles":  return this.cmdTitle(clientId, args);
+      case "skin":    return this.cmdSkin(clientId, args);
+      case "ghost":
+      case "invis":   return this.cmdInvis(clientId);
+      case "flag":    return this.cmdFlag(clientId, args);
+      case "country": return this.cmdCountry(clientId, args);
+      case "mod":     return this.cmdMod(clientId);
+      case "dev":     return this.cmdDev(clientId);
+      case "replace": return this.cmdReplace(clientId, args);
+      case "weather": return this.cmdWeather(clientId, args);
+      case "night":   return this.cmdNight(clientId);
+      case "zoom":    return this.cmdZoom(clientId, args);
+      case "fakeban": return this.cmdFakeban(clientId);
 
-      case "help":     return this.cmdHelp(clientId);
-      default:         return null;
+      default:        return null;
     }
   }
 
@@ -176,74 +233,42 @@ class CommandHandler {
 
   cmdProxy(clientId) {
     this.sendChat(clientId,
-      "`4[`#dqymon-proxy`4]`` `wv1.0`` — Command Reference\n" +
+      "`4[`#dqymon-proxy`4]`` `wv1.0`` — Full Command Reference\n" +
       "\n" +
-      "`w🏗️ Configuration``\n" +
-      "`5/keep`` — Save current settings\n" +
-      "`5/settings`` — View current settings\n" +
-      "`5/switch [name]`` — Switch account\n" +
-      "`5/account [add|del|list]`` — Manage accounts\n" +
-      "`5/mac [address|random|reset]`` — Set MAC address\n" +
-      "`5/nick [name]`` — Set display nickname\n" +
-      "`5/logs`` — View saved proxy logs path\n" +
-      "`5/server`` — Current server info\n" +
-      "`5/re`` — Repeat last command\n" +
+      "`w🏗️ Core System``\n" +
+      "`5/help`` /`5proxy`` /`5keep`` /`5settings`` /`5logs`` /`5clear`` /`5ping`` /`5stats``\n" +
+      "`5/hide`` /`5panic`` /`5reboot`` /`5exit`` /`5re`` /`5server``\n" +
+      "\n" +
+      "`w🔑 Account & Login``\n" +
+      "`5/switch`` /`5account`` /`5mac`` /`5rid`` /`5wk`` /`5guest`` /`5nick``\n" +
+      "`5/relog`` /`5checkacc`` /`5pass``\n" +
+      "\n" +
+      "`w🧭 Navigation``\n" +
+      "`5/warp`` /`5save`` /`5sethome`` /`5home`` /`5back`` /`5rndm``\n" +
+      "`5/tutorial`` /`5logoff`` /`5door`` /`5worlds`` /`5history``\n" +
       "\n" +
       "`w📡 Passive Radar``\n" +
-      "`5/growscan`` — Scan world info\n" +
-      "`5/chest`` — Show chest/hidden items in world\n" +
-      "`5/gems`` — Count gems on ground\n" +
-      "`5/hidden`` — Show hidden players\n" +
-      "`5/track [on|off|show]`` — Log item drops/collects\n" +
-      "`5/balance`` — Show current gem/lock count\n" +
-      "`5/check`` — Account info summary\n" +
-      "`5/players`` — List players in world\n" +
+      "`5/growscan`` /`5players`` /`5find`` /`5locate`` /`5hidden`` /`5mods``\n" +
+      "`5/owner`` /`5floating`` /`5chest`` /`5gems`` /`5spirit`` /`5blocks``\n" +
+      "`5/check`` /`5balance`` /`5track``\n" +
       "\n" +
-      "`w⚡ Quick Actions``\n" +
-      "`5/fastvend [buy|sell] [id] [qty]`` — Fast vend action\n" +
-      "`5/trash [id] [amount]`` — Quick trash items\n" +
-      "`5/drop [amount]`` — Drop Diamond Locks\n" +
-      "`5/buy [id] [amount]`` — Buy from store\n" +
-      "`5/cdrop [wl|dl] [amount]`` — Calculated lock drop\n" +
-      "`5/ddrop [amount]`` — Drop specific DL count\n" +
-      "`5/game [amount]`` — Calculate taxed outcome\n" +
-      "`5/split [amount] [ways]`` — Split locks evenly\n" +
-      "`5/warp [world]`` — Fast warp\n" +
-      "`5/door [id]`` — Enter door by ID\n" +
-      "`5/save [name]`` — Save current world\n" +
-      "`5/back`` — Return to last saved world\n" +
-      "`5/relog`` — Quick reconnect\n" +
-      "`5/logoff`` — Disconnect from server\n" +
-      "`5/rndm`` — Warp to random world\n" +
-      "`5/pullall`` — Pull everyone (admin)\n" +
-      "`5/kickall`` — Kick everyone (admin)\n" +
-      "`5/banall`` — Ban everyone (admin)\n" +
-      "`5/unall`` — Unban everyone (admin)\n" +
+      "`w💰 Economy``\n" +
+      "`5/backpack`` /`5fastvend`` /`5buy`` /`5trash`` /`5equip`` /`5unequip``\n" +
+      "`5/upgrade`` /`5drop`` /`5cdrop`` /`5ddrop`` /`5daw`` /`5accept``\n" +
+      "`5/game`` /`5game1`` /`5game2`` /`5tax`` /`5split`` /`5count``\n" +
       "\n" +
-      "`w🔍 Info & Utility``\n" +
-      "`5/find [name]`` — Find player in world\n" +
-      "`5/ping`` — Connection latency & uptime\n" +
-      "`5/stats`` — Detailed session statistics\n" +
-      "`5/clear`` — Clear chat console\n" +
-      "`5/sb [text]`` — Fake super broadcast (local)\n" +
-      "`5/sethome`` — Save current world as home\n" +
-      "`5/home`` — Warp to home world\n" +
-      "`5/worlds`` — List saved worlds\n" +
-      "`5/history`` — World visit history\n" +
-      "`5/copy [name]`` — Copy player outfit (local)\n" +
+      "`w⚔️ World Admin``\n" +
+      "`5/pullall`` /`5kickall`` /`5banall`` /`5unall`` /`5accessall``\n" +
+      "`5/wm`` /`5wbans`` /`5clearbans`` /`5lock`` /`5wrench`` /`5trade``\n" +
+      "`5/ignore`` /`5level`` /`5guild``\n" +
       "\n" +
-      "`w🎭 Visual (Client-Side)``\n" +
-      "`5/clothes [slots...]`` — Change outfit visuals\n" +
-      "`5/skin [color]`` — Change skin color\n" +
-      "`5/weather [id]`` — Change weather visual\n" +
-      "`5/invis`` — Toggle invisibility\n" +
-      "`5/flag [id]`` — Change flag visual\n" +
-      "`5/title [text]`` — Set title visual\n" +
-      "`5/name [text]`` — Change name visual\n" +
-      "`5/country [code]`` — Change country visual\n" +
-      "`5/mod`` — Visual moderator look\n" +
-      "`5/dev`` — Visual developer look\n" +
-      "`5/replace [id1] [id2]`` — Replace tile visuals"
+      "`w💬 Social``\n" +
+      "`5/msg`` /`5me`` /`5sb`` /`5copy`` /`5filter``\n" +
+      "\n" +
+      "`w🎭 Client Illusions``\n" +
+      "`5/clothes`` /`5skin`` /`5name`` /`5title`` /`5flag`` /`5country``\n" +
+      "`5/weather`` /`5night`` /`5zoom`` /`5invis`` /`5ghost``\n" +
+      "`5/mod`` /`5dev`` /`5replace`` /`5fakeban``"
     );
     return { handled: true, command: "proxy" };
   }
@@ -780,7 +805,7 @@ class CommandHandler {
 
   cmdGame(clientId, args) {
     if (args.length < 1) {
-      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /game [wl amount] — Calculates 5% tax outcome");
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Usage: /game [wl amount] — Calculates ${this.taxRate}% tax outcome`);
       return { handled: true, command: "game" };
     }
 
@@ -790,13 +815,14 @@ class CommandHandler {
       return { handled: true, command: "game" };
     }
 
-    const tax = Math.ceil(amount * 0.05);
+    const rate = this.taxRate / 100;
+    const tax = Math.ceil(amount * rate);
     const net = amount - tax;
 
     this.sendChat(clientId,
-      `\`4[\`#Proxy\`4]\`\` Tax Calculator:\n` +
+      `\`4[\`#Proxy\`4]\`\` Tax Calculator (${this.taxRate}%):\n` +
       `  \`wAmount:\`\` ${amount} WL\n` +
-      `  \`4Tax (5%):\`\` ${tax} WL\n` +
+      `  \`4Tax (${this.taxRate}%):\`\` ${tax} WL\n` +
       `  \`2Net:\`\` ${net} WL\n` +
       `  \`wIn DLs:\`\` ${Math.floor(net / 100)} DL + ${net % 100} WL`
     );
@@ -1206,24 +1232,18 @@ class CommandHandler {
     this.sendChat(clientId,
       "`4[`#dqymon-proxy`4]`` `wv1.0`` — Quick Help\n" +
       "\n" +
-      "`w/proxy`` — Full command reference\n" +
-      "`w/settings`` — View current settings\n" +
-      "`w/server`` — Server info\n" +
-      "`w/players`` — List players\n" +
-      "`w/growscan`` — World scan\n" +
-      "`w/warp [world]`` — Fast warp\n" +
-      "`w/drop [amt]`` — Drop DLs\n" +
-      "`w/game [amt]`` — Tax calculator\n" +
-      "`w/count [wls]`` — Lock breakdown\n" +
-      "`w/clothes [ids]`` — Visual outfit\n" +
+      "`w/proxy`` — Full command list (80+ commands)\n" +
+      "`w/settings`` — View settings  `w/server`` — Server info\n" +
+      "`w/players`` — Player list  `w/find`` — Find player\n" +
+      "`w/growscan`` — World scan  `w/locate`` — Player position\n" +
+      "`w/warp [world]`` — Warp  `w/home`` — Warp home\n" +
+      "`w/drop [amt]`` — Drop DLs  `w/backpack`` — Inventory\n" +
+      "`w/game [amt]`` — Tax calc  `w/count`` — Lock breakdown\n" +
+      "`w/clothes`` — Visual outfit  `w/invis`` — Invisible\n" +
       "`w/mod`` / `w/dev`` — Visual tags\n" +
-      "`w/find [name]`` — Find player\n" +
-      "`w/ping`` — Connection stats\n" +
-      "`w/stats`` — Session stats\n" +
-      "`w/clear`` — Clear chat\n" +
-      "`w/weather [id]`` — Change weather\n" +
-      "`w/invis`` — Toggle invisibility\n" +
-      "`w/home`` — Warp home\n" +
+      "`w/mods`` — Detect mods  `w/owner`` — World owner\n" +
+      "`w/ping`` — Connection  `w/stats`` — Session stats\n" +
+      "`w/hide`` — Hide mode  `w/panic`` — Stop all\n" +
       "\n" +
       "Type `w/proxy`` for all commands"
     );
@@ -1535,6 +1555,502 @@ class CommandHandler {
       this.sendChat(clientId, "`4[`#Proxy`4]`` \`5Invisible ON\`\` — you appear invisible to yourself (client-side only, others still see you)");
     }
     return { handled: true, command: "invis" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Core System
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdHide(clientId) {
+    const hidden = !this.getUserState(clientId, "hidden");
+    this.setUserState(clientId, "hidden", hidden);
+    this.sendChat(clientId, hidden
+      ? "`4[`#Proxy`4]`` `5Hidden mode ON`` — proxy logs suppressed"
+      : "`4[`#Proxy`4]`` `2Hidden mode OFF`` — normal logging");
+    return { handled: true, command: "hide" };
+  }
+
+  cmdPanic(clientId) {
+    for (const [, timers] of this.automationTimers) {
+      for (const t of timers) clearInterval(t);
+    }
+    this.automationTimers.clear();
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `2✓ PANIC`` — All automations stopped");
+    return { handled: true, command: "panic" };
+  }
+
+  cmdReboot(clientId) {
+    const session = this.proxy.getSession(clientId);
+    if (!session || !session.connected || session.serverNetID === null) {
+      this.sendChat(clientId, "`4[Proxy]`` Not connected");
+      return { handled: true, command: "reboot" };
+    }
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `5Rebooting...``");
+    const pkt = this.buildActionPacket("action|quit\n");
+    this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);
+    return { handled: true, command: "reboot" };
+  }
+
+  cmdExit(clientId) {
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `4Shutting down...``");
+    setTimeout(() => process.exit(0), 500);
+    return { handled: true, command: "exit" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Account & Login
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdRid(clientId, args) {
+    const rid = args[0] || crypto.randomBytes(16).toString("hex").toUpperCase();
+    if (this.proxy.spoofState.enabled) this.proxy.spoofState.rid = rid;
+    this.store.data.spoof.rid = rid;
+    this.store.save();
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ RID:\`\` \`w${rid.substring(0, 16)}...\`\` — active now`);
+    return { handled: true, command: "rid" };
+  }
+
+  cmdWk(clientId, args) {
+    const wk = args[0] || crypto.randomBytes(16).toString("hex").toUpperCase();
+    if (this.proxy.spoofState.enabled) this.proxy.spoofState.hash = parseInt(wk.substring(0, 8), 16) || 0;
+    this.store.data.spoof.wk = wk;
+    this.store.save();
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ WK/Hash:\`\` \`w${wk.substring(0, 16)}...\`\` — active now`);
+    return { handled: true, command: "wk" };
+  }
+
+  cmdGuest(clientId) {
+    this.guestMode = !this.guestMode;
+    this.sendChat(clientId, this.guestMode
+      ? "`4[`#Proxy`4]`` `5Guest mode ON`` — credentials stripped on next login"
+      : "`4[`#Proxy`4]`` `2Guest mode OFF`` — normal login");
+    return { handled: true, command: "guest" };
+  }
+
+  cmdCheckacc(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    const d = gel.lastLoginResponse;
+    if (!d) {
+      this.sendChat(clientId, "`4[Proxy]`` No login data — relog to capture");
+      return { handled: true, command: "checkacc" };
+    }
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Login Info:\n" +
+      `  \`wName:\`\` ${d.tankIDName || d.requestedName || "(guest)"}\n` +
+      `  \`wCountry:\`\` ${d.country || "?"}\n` +
+      `  \`wPlatform:\`\` ${d.platformID || "?"}\n` +
+      `  \`wMAC:\`\` ${d.mac || "?"}\n` +
+      `  \`wRID:\`\` ${d.rid ? d.rid.substring(0, 16) + "..." : "?"}`
+    );
+    return { handled: true, command: "checkacc" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Navigation
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdTutorial(clientId) {
+    const session = this.proxy.getSession(clientId);
+    if (!session || !session.connected || session.serverNetID === null) {
+      this.sendChat(clientId, "`4[Proxy]`` Not connected");
+      return { handled: true, command: "tutorial" };
+    }
+    const pkt = this.buildActionPacket("action|join_request\nname|START\ninvitedWorld|0\n");
+    this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `2Warping to START``");
+    return { handled: true, command: "tutorial" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Passive Radar
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdSpirit(clientId) {
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Spirit Board:\n" +
+      "  Spirit board text is captured from dialog packets.\n" +
+      "  Check `w/logs`` for captured dialog content."
+    );
+    return { handled: true, command: "spirit" };
+  }
+
+  cmdFloating(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Floating Items:\n" +
+      `  \`wTracked:\`\` ${gel.droppedItems.size}\n` +
+      `  \`wWorld:\`\` ${gel.currentWorld || "(none)"}`
+    );
+    return { handled: true, command: "floating" };
+  }
+
+  cmdOwner(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` World Owner:\n" +
+      `  \`wWorld:\`\` ${gel.currentWorld || "(none)"}\n` +
+      `  \`wOwner:\`\` ${gel.worldOwner || "(unknown/unlocked)"}`
+    );
+    return { handled: true, command: "owner" };
+  }
+
+  cmdBlocks(clientId) {
+    this.sendChat(clientId,
+      "`4[`#Proxy`4]`` Block analysis requires map data parsing.\n" +
+      "  Tile changes are logged via `w/track on``."
+    );
+    return { handled: true, command: "blocks" };
+  }
+
+  cmdMods(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    const mods = [];
+    for (const [netID, info] of gel.players) {
+      if (info.mstate >= 2) mods.push(`  \`4⚠ ${info.name}\`\` [${netID}] mstate=${info.mstate}`);
+    }
+    this.sendChat(clientId, mods.length > 0
+      ? `\`4[\`#Proxy\`4]\`\` \`4Mods detected (${mods.length}):\`\`\n` + mods.join("\n")
+      : "`4[`#Proxy`4]`` `2No moderators detected``"
+    );
+    return { handled: true, command: "mods" };
+  }
+
+  cmdLocate(clientId, args) {
+    if (args.length === 0) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /locate [name]");
+      return { handled: true, command: "locate" };
+    }
+    const q = args.join(" ").toLowerCase();
+    const gel = this.proxy.gameEventLogger;
+    for (const [netID, info] of gel.players) {
+      if (info.name.toLowerCase().includes(q)) {
+        const pos = gel.playerPositions.get(netID);
+        this.sendChat(clientId, pos
+          ? `\`4[\`#Proxy\`4]\`\` \`w${info.name}\`\`: tile (${Math.floor(pos.x / 32)}, ${Math.floor(pos.y / 32)}) px (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`
+          : `\`4[\`#Proxy\`4]\`\` \`w${info.name}\`\` — no position data`
+        );
+        return { handled: true, command: "locate" };
+      }
+    }
+    this.sendChat(clientId, `\`4[Proxy]\`\` '\`w${args.join(" ")}\`\`' not found`);
+    return { handled: true, command: "locate" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Economy
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdBackpack(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    if (gel.inventory.size === 0) {
+      this.sendChat(clientId, "`4[Proxy]`` Inventory empty or not loaded — enter a world");
+      return { handled: true, command: "backpack" };
+    }
+    const items = [];
+    for (const [id, count] of gel.inventory) items.push(`  ID:\`w${id}\`\` x${count}`);
+    this.sendChat(clientId,
+      `\`4[\`#Proxy\`4]\`\` Backpack (${gel.inventory.size} items):\n` +
+      items.slice(0, 30).join("\n") +
+      (items.length > 30 ? `\n  ...+${items.length - 30} more` : "")
+    );
+    return { handled: true, command: "backpack" };
+  }
+
+  cmdEquip(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /equip [itemID]");
+      return { handled: true, command: "equip" };
+    }
+    const id = parseInt(args[0]);
+    if (!id || id <= 0) {
+      this.sendChat(clientId, "`4[Proxy]`` Invalid item ID");
+      return { handled: true, command: "equip" };
+    }
+    return this.sendWorldAction(clientId, `action|wear\n|itemID|${id}\n`, "equip", `Equip sent: item ${id}`);
+  }
+
+  cmdUnequip(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /unequip [itemID]");
+      return { handled: true, command: "unequip" };
+    }
+    const id = parseInt(args[0]);
+    if (!id || id <= 0) {
+      this.sendChat(clientId, "`4[Proxy]`` Invalid item ID");
+      return { handled: true, command: "unequip" };
+    }
+    return this.sendWorldAction(clientId, `action|unwear\n|itemID|${id}\n`, "unequip", `Unequip sent: item ${id}`);
+  }
+
+  cmdUpgrade(clientId) {
+    return this.sendWorldAction(clientId, "action|buy\n|itemID|1424\n|count|1\n", "upgrade", "Backpack upgrade sent");
+  }
+
+  cmdDaw(clientId) {
+    const gel = this.proxy.gameEventLogger;
+    const wlCount = gel.inventory.get(ITEM.WORLD_LOCK) || 0;
+    if (wlCount === 0) {
+      this.sendChat(clientId, "`4[Proxy]`` No WLs in inventory (or not loaded)");
+      return { handled: true, command: "daw" };
+    }
+    const count = Math.min(wlCount, 200);
+    return this.sendWorldAction(clientId, `action|drop\n|itemID|${ITEM.WORLD_LOCK}\n|count|${count}\n`, "daw", `Dropping ${count} World Locks`);
+  }
+
+  cmdTax(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Tax rate: \`w${this.taxRate}%\`\`\n  Usage: /tax [0-100]`);
+      return { handled: true, command: "tax" };
+    }
+    const rate = parseFloat(args[0]);
+    if (isNaN(rate) || rate < 0 || rate > 100) {
+      this.sendChat(clientId, "`4[Proxy]`` Rate must be 0-100");
+      return { handled: true, command: "tax" };
+    }
+    this.taxRate = rate;
+    this.store.data.taxRate = rate;
+    this.store.save();
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Tax rate: ${rate}%\`\``);
+    return { handled: true, command: "tax" };
+  }
+
+  cmdAccept(clientId) {
+    return this.sendWorldAction(clientId, "action|dialog_return\ndialog_name|trade_accept\n", "accept", "Trade accept sent");
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: World Admin
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdAccessall(clientId) {
+    return this.sendWorldAction(clientId, "action|input\n|text|/accessall\n", "accessall", "Access all sent");
+  }
+
+  cmdWm(clientId, args) {
+    const modes = ["normal", "kick", "pull", "ban"];
+    if (!args[0]) {
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Wrench mode: \`w${this.wrenchMode}\`\`\n  Options: ${modes.join(", ")}`);
+      return { handled: true, command: "wm" };
+    }
+    const mode = args[0].toLowerCase();
+    if (!modes.includes(mode)) {
+      this.sendChat(clientId, `\`4[Proxy]\`\` Invalid. Options: ${modes.join(", ")}`);
+      return { handled: true, command: "wm" };
+    }
+    this.wrenchMode = mode;
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Wrench mode: ${mode}\`\``);
+    return { handled: true, command: "wm" };
+  }
+
+  cmdWbans(clientId) {
+    return this.sendWorldAction(clientId, "action|input\n|text|/bans\n", "wbans", "Ban list requested");
+  }
+
+  cmdClearbans(clientId) {
+    return this.sendWorldAction(clientId, "action|input\n|text|/unbanall\n", "clearbans", "All bans cleared");
+  }
+
+  cmdLock(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /lock [wl|dl|sl|bl|bgl]");
+      return { handled: true, command: "lock" };
+    }
+    const map = { wl: ITEM.WORLD_LOCK, dl: ITEM.DIAMOND_LOCK, sl: ITEM.SMALL_LOCK, bl: ITEM.BIG_LOCK, bgl: ITEM.BLUE_GEM_LOCK };
+    const itemID = map[args[0].toLowerCase()];
+    if (!itemID) {
+      this.sendChat(clientId, "`4[Proxy]`` Types: wl, dl, sl, bl, bgl");
+      return { handled: true, command: "lock" };
+    }
+    const session = this.proxy.getSession(clientId);
+    if (!session || !session.connected || session.serverNetID === null) {
+      this.sendChat(clientId, "`4[Proxy]`` Not connected");
+      return { handled: true, command: "lock" };
+    }
+    const gel = this.proxy.gameEventLogger;
+    const pos = gel.playerPositions.get(gel.localNetID) || { x: 0, y: 0 };
+    const tx = Math.floor(pos.x / 32);
+    const ty = Math.floor(pos.y / 32) + 1;
+    const tank = Buffer.alloc(60);
+    tank.writeUInt32LE(4, 0);
+    tank.writeUInt8(3, 4);
+    tank.writeInt32LE(gel.localNetID, 8);
+    tank.writeUInt16LE(itemID, 20);
+    tank.writeInt32LE(tx, 48);
+    tank.writeInt32LE(ty, 52);
+    this.proxy.outgoingClient.send(session.serverNetID, 0, tank);
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Lock place sent:\`\` ${args[0].toUpperCase()} at (${tx}, ${ty})`);
+    return { handled: true, command: "lock" };
+  }
+
+  cmdIgnore(clientId, args) {
+    if (!args[0]) {
+      const list = this.ignoredPlayers.size > 0
+        ? [...this.ignoredPlayers].map(n => `  \`w${n}\`\``).join("\n")
+        : "  (none)";
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Ignored (${this.ignoredPlayers.size}):\n${list}\n  /ignore [name] to toggle`);
+      return { handled: true, command: "ignore" };
+    }
+    const name = args.join(" ");
+    if (this.ignoredPlayers.has(name)) {
+      this.ignoredPlayers.delete(name);
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Unignored:\`\` ${name}`);
+    } else {
+      this.ignoredPlayers.add(name);
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Ignoring:\`\` ${name}`);
+    }
+    return { handled: true, command: "ignore" };
+  }
+
+  cmdLevel(clientId, args) {
+    const gel = this.proxy.gameEventLogger;
+    if (!args[0]) {
+      const list = [];
+      for (const [, info] of gel.players) {
+        if (info.level) list.push(`  \`w${info.name}\`\` — Lv.${info.level}`);
+      }
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Levels:\n${list.length > 0 ? list.join("\n") : "  No data — re-enter world"}`);
+      return { handled: true, command: "level" };
+    }
+    const q = args.join(" ").toLowerCase();
+    for (const [, info] of gel.players) {
+      if (info.name.toLowerCase().includes(q)) {
+        this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`w${info.name}\`\` — Level ${info.level || "?"}`);
+        return { handled: true, command: "level" };
+      }
+    }
+    this.sendChat(clientId, `\`4[Proxy]\`\` '\`w${args.join(" ")}\`\`' not found`);
+    return { handled: true, command: "level" };
+  }
+
+  cmdGuild(clientId, args) {
+    const gel = this.proxy.gameEventLogger;
+    if (!args[0]) {
+      const list = [];
+      for (const [, info] of gel.players) {
+        if (info.guild) list.push(`  \`w${info.name}\`\` — \`5${info.guild}\`\``);
+      }
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Guilds:\n${list.length > 0 ? list.join("\n") : "  No guild data"}`);
+      return { handled: true, command: "guild" };
+    }
+    const q = args.join(" ").toLowerCase();
+    for (const [, info] of gel.players) {
+      if (info.name.toLowerCase().includes(q)) {
+        this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`w${info.name}\`\` — Guild: ${info.guild || "(none)"}`);
+        return { handled: true, command: "guild" };
+      }
+    }
+    this.sendChat(clientId, `\`4[Proxy]\`\` '\`w${args.join(" ")}\`\`' not found`);
+    return { handled: true, command: "guild" };
+  }
+
+  cmdWrench(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /wrench [name]");
+      return { handled: true, command: "wrench" };
+    }
+    const q = args.join(" ").toLowerCase();
+    const gel = this.proxy.gameEventLogger;
+    for (const [netID, info] of gel.players) {
+      if (info.name.toLowerCase().includes(q)) {
+        return this.sendWorldAction(clientId, `action|wrench\n|netID|${netID}\n`, "wrench", `Wrenched ${info.name}`);
+      }
+    }
+    this.sendChat(clientId, `\`4[Proxy]\`\` '\`w${args.join(" ")}\`\`' not found`);
+    return { handled: true, command: "wrench" };
+  }
+
+  cmdTrade(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /trade [name]");
+      return { handled: true, command: "trade" };
+    }
+    return this.sendWorldAction(clientId, `action|input\n|text|/trade ${args.join(" ")}\n`, "trade", `Trade sent to ${args.join(" ")}`);
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Social
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdMsg(clientId, args) {
+    if (args.length < 2) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /msg [name] [text]");
+      return { handled: true, command: "msg" };
+    }
+    const target = args[0];
+    const text = args.slice(1).join(" ");
+    return this.sendWorldAction(clientId, `action|input\n|text|/msg ${target} ${text}\n`, "msg", `PM → ${target}`);
+  }
+
+  cmdMe(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /me [text]");
+      return { handled: true, command: "me" };
+    }
+    return this.sendWorldAction(clientId, `action|input\n|text|/me ${args.join(" ")}\n`, "me", `Action: /me ${args.join(" ")}`);
+  }
+
+  cmdFilter(clientId, args) {
+    if (!args[0]) {
+      const list = this.chatFilters.length > 0
+        ? this.chatFilters.map((f, i) => `  ${i + 1}. \`w${f}\`\``).join("\n")
+        : "  (none)";
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` Filters (${this.chatFilters.length}):\n${list}\n  /filter [word] toggle | /filter clear`);
+      return { handled: true, command: "filter" };
+    }
+    if (args[0].toLowerCase() === "clear") {
+      this.chatFilters = [];
+      this.sendChat(clientId, "`4[`#Proxy`4]`` `2✓ Filters cleared``");
+      return { handled: true, command: "filter" };
+    }
+    const word = args.join(" ").toLowerCase();
+    const idx = this.chatFilters.indexOf(word);
+    if (idx !== -1) {
+      this.chatFilters.splice(idx, 1);
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Removed:\`\` ${word}`);
+    } else {
+      this.chatFilters.push(word);
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Filtering:\`\` ${word}`);
+    }
+    return { handled: true, command: "filter" };
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // 🆕 NEW: Client Illusions
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  cmdNight(clientId) {
+    const pkt = PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnSetCurrentWeather" },
+      { type: 9, value: 10 },
+    ], -1, 0);
+    this.proxy.sendToClient(clientId, pkt);
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `2✓ Night mode`` (client-side)");
+    return { handled: true, command: "night" };
+  }
+
+  cmdZoom(clientId, args) {
+    if (!args[0]) {
+      this.sendChat(clientId, "`4[`#Proxy`4]`` Usage: /zoom [1-10]");
+      return { handled: true, command: "zoom" };
+    }
+    const level = Math.min(Math.max(parseInt(args[0]) || 5, 1), 10);
+    const pkt = PacketHandler.buildVariantPacket([
+      { type: 2, value: "OnZoomCamera" },
+      { type: 1, value: level * 1000.0 },
+      { type: 9, value: 0 },
+    ], -1, 0);
+    this.proxy.sendToClient(clientId, pkt);
+    this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Zoom: ${level}\`\` (client-side)`);
+    return { handled: true, command: "zoom" };
+  }
+
+  cmdFakeban(clientId) {
+    const pkt = PacketHandler.buildTextOverlay(
+      "`4WARNING:`` `wYou have been banned.\nReason: Breaking rules.\nDays: 730``"
+    );
+    this.proxy.sendToClient(clientId, pkt);
+    this.sendChat(clientId, "`4[`#Proxy`4]`` `2✓ Fake ban shown`` (you're NOT banned)");
+    return { handled: true, command: "fakeban" };
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

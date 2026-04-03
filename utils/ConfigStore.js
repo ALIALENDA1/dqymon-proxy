@@ -26,16 +26,33 @@ class ConfigStore {
       savedWorlds: [],
       // Last used command for /re
       lastCommand: null,
+      // Home world for /setsave / /back
+      homeWorld: null,
+      // Tax rate for /tax
+      taxRate: 5,
+      // Ignored players for /ignore
+      ignoredPlayers: [],
+      // Chat word filters for /filter
+      chatFilters: [],
+      // World visit history
+      worldHistory: [],
+      // Wrench mode override
+      wrenchMode: "normal",
+      // Guest mode flag
+      guestMode: false,
       // UI prefs
       ui: {
         color: "cyan",
         showBroadcasts: true,
         showTradeMessages: true,
+        showDropLogs: true,
+        showGemPickups: true,
       },
       // Spoofing prefs
       spoof: {
         mac: "random",
         rid: "random",
+        wk: "random",
         hash: "random",
         hash2: "random",
         fhash: "random",
@@ -46,6 +63,9 @@ class ConfigStore {
         customSkin: null,
         customFlag: null,
         customName: null,
+        customTitle: null,
+        ghostMode: false,
+        nightMode: false,
       },
     };
   }
