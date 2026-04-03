@@ -613,42 +613,46 @@ class GrowtopiaProxy {
    * Returns modified payload Buffer, or original if spoofing is disabled.
    */
   spoofLoginInfo(session, data) {
-    // Parse binary login payload into key|value pairs.
-    // The GT client uses \n (0x0A) as the primary field separator but between
-    // certain adjacent fields (zf→lmode) it uses other non-printable bytes.
-    // We replace ALL non-printable / non-ASCII bytes with \n, then keep only
-    // lines that look like valid key|value pairs.
     const rawBytes = data.slice(4);
 
-    // Hex-dump around "zf|" for debugging the mysterious separator
+    // Debug: hex-dump around "zf|" for sub-server logins
     if (session.isSubServerRedirect) {
       const zfIdx = rawBytes.indexOf(Buffer.from("zf|", "latin1"));
       if (zfIdx >= 0) {
-        const start = zfIdx;
-        const end = Math.min(start + 50, rawBytes.length);
-        const hexDump = Array.from(rawBytes.slice(start, end))
+        const end = Math.min(zfIdx + 50, rawBytes.length);
+        const hexDump = Array.from(rawBytes.slice(zfIdx, end))
           .map(b => b.toString(16).padStart(2, "0")).join(" ");
-        const asciiDump = Array.from(rawBytes.slice(start, end))
-          .map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : ".").join("");
         logger.info(`[${session.clientId}] HEX zf area: ${hexDump}`);
-        logger.info(`[${session.clientId}] ASC zf area: ${asciiDump}`);
       }
     }
 
-    let text = rawBytes.toString("latin1")
-      // Replace ALL non-printable and non-ASCII bytes with \n.
-      // Preserves only printable ASCII (0x20-0x7E) plus tab (0x09).
-      // \n (0x0A) is already a valid separator; \r (0x0D) becomes \n.
-      .replace(/[^\x09\x0a\x20-\x7e]/g, "\n")
-      .split("\n")
-      .filter(l => /^[a-zA-Z_]\w*\|/.test(l))  // keep only valid key|value lines
-      .join("\n");
+    // ── Parse login packet into key→value pairs ──
+    // The GT client uses \n between MOST fields, but concatenates some
+    // WITHOUT any separator (confirmed via hex dump: zf|-1448935104lmode|1
+    // has NO byte between "4" and "l", just consecutive printable ASCII).
+    //
+    // Strategy: convert to latin1, clean non-printable bytes, then use
+    // exec() with /g to find all key| occurrences. exec() advances past
+    // each match, so "zf|" at pos 0 advances to pos 3, skipping "f|" at
+    // pos 1. Each key's value runs from after its | to the next key's start.
+    const rawText = rawBytes.toString("latin1")
+      .replace(/[^\x09\x0a\x20-\x7e]/g, "\n");  // non-printable → \n
 
-    // Parse the login pairs for logging
+    const pairOrder = [];
     const pairs = {};
-    for (const line of text.split("\n")) {
-      const idx = line.indexOf("|");
-      if (idx !== -1) pairs[line.substring(0, idx)] = line.substring(idx + 1);
+
+    const keyRegex = /([a-zA-Z_]\w*)\|/g;
+    const keyPositions = [];
+    let m;
+    while ((m = keyRegex.exec(rawText)) !== null) {
+      keyPositions.push({ key: m[1], keyStart: m.index, valueStart: m.index + m[0].length });
+    }
+    for (let i = 0; i < keyPositions.length; i++) {
+      const curr = keyPositions[i];
+      const nextKeyStart = (i + 1 < keyPositions.length) ? keyPositions[i + 1].keyStart : rawText.length;
+      const value = rawText.substring(curr.valueStart, nextKeyStart).replace(/[\n]+$/, "");
+      pairs[curr.key] = value;
+      if (!pairOrder.includes(curr.key)) pairOrder.push(curr.key);
     }
 
     // Log original login info
@@ -664,40 +668,36 @@ class GrowtopiaProxy {
       logger.info(`[${session.clientId}] Login auth: ${authInfo}`);
     }
 
-    // For sub-server logins, log ALL fields — critical for debugging "Bad logon"
+    // For sub-server logins, log ALL fields
     if (session.isSubServerRedirect) {
       logger.info(`[${session.clientId}] ── Sub-server login packet (ALL fields) ──`);
-      for (const [k, v] of Object.entries(pairs)) {
+      for (const key of pairOrder) {
+        const v = pairs[key];
         const display = v.length > 60 ? v.substring(0, 60) + `... (${v.length}c)` : v;
-        logger.info(`[${session.clientId}]   ${k} = ${display}`);
+        logger.info(`[${session.clientId}]   ${key} = ${display}`);
       }
       logger.info(`[${session.clientId}] ── End login packet ──`);
     }
 
     if (!this.spoofState.enabled) return data;
 
-    // Replace device fingerprints.
-    // After normalization, text only has \n separators, so ^key\|.+$ is safe.
-    const replace = (key, value) => {
-      const regex = new RegExp(`^${key}\\|.+$`, "m");
-      if (regex.test(text)) {
-        text = text.replace(regex, `${key}|${value}`);
-      }
-    };
-
-    replace("mac", this.spoofState.mac);
-    replace("rid", this.spoofState.rid);
-    replace("hash", this.spoofState.hash);
-    replace("hash2", this.spoofState.hash2);
-    replace("fhash", this.spoofState.fhash);
-    replace("zf", this.spoofState.zf);
+    // ── Spoof device fingerprints ──
+    // Now that fields are properly separated (zf and lmode are distinct keys),
+    // we can safely modify individual values without destroying adjacent fields.
+    if (pairs.mac !== undefined) pairs.mac = this.spoofState.mac;
+    if (pairs.rid !== undefined) pairs.rid = this.spoofState.rid;
+    if (pairs.hash !== undefined) pairs.hash = String(this.spoofState.hash);
+    if (pairs.hash2 !== undefined) pairs.hash2 = String(this.spoofState.hash2);
+    if (pairs.fhash !== undefined) pairs.fhash = String(this.spoofState.fhash);
+    if (pairs.zf !== undefined) pairs.zf = String(this.spoofState.zf);
 
     logger.info(`[${session.clientId}] ✓ Spoofed login: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
 
-    // Rebuild the binary payload (null-terminated)
+    // Rebuild packet with \n separators (server finds keys via indexOf, not line splitting)
+    const text = pairOrder.map(k => `${k}|${pairs[k]}`).join("\n");
     const header = Buffer.alloc(4);
     header.writeUInt32LE(2, 0);
-    return Buffer.concat([header, Buffer.from(text + "\0", "latin1")]);
+    return Buffer.concat([header, Buffer.from(text + "\n\0", "latin1")]);
   }
 
   // ── Utility ────────────────────────────────────────────────────────
