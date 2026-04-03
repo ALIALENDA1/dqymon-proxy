@@ -158,9 +158,12 @@ class GrowtopiaProxy {
       if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
       if (this.session.serverNetID !== null) {
         try {
-          // Send proper DISCONNECT to GT server so it can release the session
-          // and activate the sub-server token. Then flush to send immediately.
+          // CRITICAL: Flush pending data FIRST (e.g., client's TANK 26 response
+          // to OnSendToServer). Without this, disconnectNow() resets the peer
+          // queue and the gateway never receives the acknowledgment, so it
+          // never properly activates the sub-server session token.
           const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+          this.outgoingClient.host.flush();
           peer.disconnectNow(this.outgoingClient.host, 0);
           this.outgoingClient.host.flush();
           logger.info(`[${this.session.clientId}] ✓ Sent disconnect to GT server ${this.session.serverHost}:${this.session.serverPort}`);
@@ -341,11 +344,13 @@ class GrowtopiaProxy {
       `(${this.session.clientPackets} sent, ${this.session.serverPackets} received)`
     );
 
-    // Disconnect from GT server too
+    // Disconnect from GT server too — flush pending data first
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+        this.outgoingClient.host.flush();
         peer.disconnectNow(this.outgoingClient.host, 0);
+        this.outgoingClient.host.flush();
       } catch (e) {}
     }
 
@@ -359,6 +364,9 @@ class GrowtopiaProxy {
    */
   onServerDisconnect(netID) {
     if (!this.session) return;
+    // Ignore stale disconnect events from an old connection (e.g., gateway)
+    // that could clobber the new sub-server session state.
+    if (this.session.serverNetID !== null && this.session.serverNetID !== netID) return;
 
     logger.info(`[${this.session.clientId}] GT server disconnected (netID=${netID})`);
 
@@ -617,10 +625,10 @@ class GrowtopiaProxy {
 
     logger.info(`[${session.clientId}] ✓ Spoofed login: MAC=${this.spoofState.mac} RID=${this.spoofState.rid.substring(0, 8)}...`);
 
-    // Rebuild the binary payload
+    // Rebuild the binary payload (null-terminated — sub-server requires it)
     const header = Buffer.alloc(4);
     header.writeUInt32LE(2, 0);
-    return Buffer.concat([header, Buffer.from(text, "utf8")]);
+    return Buffer.concat([header, Buffer.from(text + "\0", "utf8")]);
   }
 
   // ── Utility ────────────────────────────────────────────────────────
@@ -647,17 +655,21 @@ class GrowtopiaProxy {
 
     if (this.session.noResponseTimer) clearTimeout(this.session.noResponseTimer);
 
-    // Disconnect both peers — use disconnectNow to notify remote side
+    // Disconnect both peers — flush pending data, then disconnectNow
     if (this.session.serverNetID !== null) {
       try {
         const peer = this.outgoingClient.host.getPeer(this.session.serverNetID);
+        this.outgoingClient.host.flush();
         peer.disconnectNow(this.outgoingClient.host, 0);
+        this.outgoingClient.host.flush();
       } catch (e) {}
     }
     if (this.session.clientNetID !== null) {
       try {
         const peer = this.serverClient.host.getPeer(this.session.clientNetID);
+        this.serverClient.host.flush();
         peer.disconnectNow(this.serverClient.host, 0);
+        this.serverClient.host.flush();
       } catch (e) {}
     }
 
