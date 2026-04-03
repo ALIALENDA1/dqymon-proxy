@@ -1398,12 +1398,18 @@ class CommandHandler {
   }
 
   cmdSethome(clientId) {
-    const world = this.proxy.gameEventLogger.currentWorld;
+    let world = this.proxy.gameEventLogger.currentWorld;
+    // Fallback: use last joined world from joinHistory if currentWorld is empty
+    if (!world) {
+      const gel = this.proxy.gameEventLogger;
+      if (gel.joinHistory && gel.joinHistory.length > 0) {
+        world = gel.joinHistory[gel.joinHistory.length - 1].name;
+      }
+    }
     if (!world) {
       this.sendChat(clientId, "`4[Proxy]`` You're not in a world");
       return { handled: true, command: "sethome" };
     }
-
     this.store.set("homeWorld", world);
     this.store.save();
     this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Home set to:\`\` \`w${world}\`\``);
