@@ -784,6 +784,7 @@ Logger.section("Initializing");
 
 // The proxy needs access to the loginServer to read dynamic server address
 proxy.loginServer = loginServer;
+proxy.gameLog = gameLog;
 loginServer.gameLog = gameLog;
 
 // When a new login (server_data) is served, clear the current session.

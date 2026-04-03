@@ -13,6 +13,7 @@ class GameEventLogger {
     this.playerName = "";
     this.localNetID = -1;
     this.players = new Map(); // netID → { name, country }
+    this.lastGems = undefined;  // last known gem count
   }
 
   // ── Color stripping ──────────────────────────────────────────────
@@ -206,6 +207,7 @@ class GameEventLogger {
 
   onSetBux(variants) {
     if (variants.length >= 2 && (variants[1].type === 5 || variants[1].type === 9)) {
+      this.lastGems = variants[1].value;
       this.logger.game(`[GEMS] Gems: ${variants[1].value}`);
     }
   }
