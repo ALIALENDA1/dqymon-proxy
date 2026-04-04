@@ -14,6 +14,7 @@ class GameEventLogger {
     this.localNetID = -1;
     this.players = new Map(); // netID → { name, country }
     this.lastGems = undefined;  // last known gem count
+    this.inventory = new Map(); // itemID → count
   }
 
   // ── Color stripping ──────────────────────────────────────────────
@@ -297,6 +298,37 @@ class GameEventLogger {
         this.logger.debug(`[TILE] Place/break at (${tileX},${tileY}) item=${itemID}`);
       }
     }
+    // SEND_INVENTORY (type 10) — parse inventory from extra data
+    if (tankType === 10) {
+      const extraSize = payload.readUInt32LE(52);
+      if (extraSize > 0 && payload.length >= 56 + extraSize) {
+        this.parseInventory(payload.slice(56, 56 + extraSize));
+      }
+    }
+  }
+
+  /**
+   * Parse inventory data from SEND_INVENTORY extra data.
+   */
+  parseInventory(data) {
+    try {
+      if (data.length < 7) return;
+      // Format: version(1) + backpackSize(int32) + itemCount(int16)
+      const backpackSize = data.readUInt32LE(1);
+      const itemCount = data.readUInt16LE(5);
+      this.inventory.clear();
+      let offset = 7;
+      for (let i = 0; i < itemCount && offset + 4 <= data.length; i++) {
+        const itemID = data.readUInt16LE(offset);
+        const count = data.readUInt16LE(offset + 2);
+        if (itemID > 0) this.inventory.set(itemID, count);
+        offset += 4;
+      }
+      this.logger.debug(`[INV] Parsed ${this.inventory.size} items (backpack: ${backpackSize})`);
+    } catch (e) {
+      this.logger.debug(`[INV] Parse failed: ${e.message}`);
+    }
+  }
   }
 
   /**
