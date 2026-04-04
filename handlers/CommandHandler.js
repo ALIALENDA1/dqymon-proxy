@@ -703,6 +703,7 @@ class CommandHandler {
     }
     const gel = this.proxy.gameEventLogger;
     const before = gel.inventory.get(ITEM.DIAMOND_LOCK) || 0;
+    this.logger.debug(`[DROP] Before: ${before} DL`);
     const actionText = `action|drop\n|itemID|${ITEM.DIAMOND_LOCK}\n`;
     const pkt = this.buildActionPacket(actionText);
     for (let i = 0; i < amount; i++) {
@@ -714,11 +715,15 @@ class CommandHandler {
     while (tries < 20) {
       await new Promise(r => setTimeout(r, 100));
       after = gel.inventory.get(ITEM.DIAMOND_LOCK) || 0;
+      this.logger.debug(`[DROP] Try ${tries + 1}: DL in inv = ${after}`);
       if (after < before) break;
       tries++;
     }
     if (after < before) {
       this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${before - after} Diamond Lock${before - after === 1 ? "" : "s"}\`\``);
+    } else if (before >= amount) {
+      // Fallback: trust the drop if we had enough DLs and sent the packets
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Drop attempted: ${amount} Diamond Lock${amount === 1 ? "" : "s"} (inventory update not detected, check world)`);
     } else {
       this.sendChat(clientId, "`4[Proxy]`` Drop failed: No Diamond Locks were removed from your inventory.\nPossible reasons: not enough DLs, blocked spot, or server rejected the drop.");
     }
