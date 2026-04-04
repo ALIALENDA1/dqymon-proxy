@@ -695,7 +695,14 @@ class CommandHandler {
   }
 
   async cmdDrop(clientId, args) {
-    const amount = Math.min(Math.max(parseInt(args[0]) || 1, 1), 200);
+    let force = false;
+    let amountArg = args[0];
+    if (args.length > 1 && args[1].toLowerCase() === "force") force = true;
+    if (typeof amountArg === "string" && amountArg.toLowerCase() === "force") {
+      force = true;
+      amountArg = args[1] || 1;
+    }
+    const amount = Math.min(Math.max(parseInt(amountArg) || 1, 1), 200);
     const session = this.proxy.getSession(clientId);
     if (!session || !session.connected || session.serverNetID === null) {
       this.sendChat(clientId, "`4[Proxy]`` Not connected to server");
@@ -721,9 +728,8 @@ class CommandHandler {
     }
     if (after < before) {
       this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Dropped ${before - after} Diamond Lock${before - after === 1 ? "" : "s"}\`\``);
-    } else if (before >= amount) {
-      // Fallback: trust the drop if we had enough DLs and sent the packets
-      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Drop attempted: ${amount} Diamond Lock${amount === 1 ? "" : "s"} (inventory update not detected, check world)`);
+    } else if (before >= amount || force) {
+      this.sendChat(clientId, `\`4[\`#Proxy\`4]\`\` \`2✓ Drop attempted: ${amount} Diamond Lock${amount === 1 ? "" : "s"} (forced or inventory update not detected, check world)`);
     } else {
       this.sendChat(clientId, "`4[Proxy]`` Drop failed: No Diamond Locks were removed from your inventory.\nPossible reasons: not enough DLs, blocked spot, or server rejected the drop.");
     }
