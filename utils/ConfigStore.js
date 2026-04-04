@@ -52,7 +52,6 @@ class ConfigStore {
       spoof: {
         mac: "random",
         rid: "random",
-        wk: "random",
         hash: "random",
         hash2: "random",
         fhash: "random",

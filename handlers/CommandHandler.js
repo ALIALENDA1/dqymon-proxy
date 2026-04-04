@@ -173,7 +173,8 @@ class CommandHandler {
       case "unequip": return this.cmdUnequip(clientId, args);
       case "upgrade": return this.cmdUpgrade(clientId);
       case "drop":
-      case "dropdl":  return this.cmdDrop(clientId, args);
+      case "dropdl":
+      case "dd":      return this.cmdDrop(clientId, args);
       case "cdrop":   return this.cmdCdrop(clientId, args);
       case "ddrop":   return this.cmdDdrop(clientId, args);
       case "daw":     return this.cmdDaw(clientId);
