@@ -334,7 +334,6 @@ class GameEventLogger {
       this.logger.debug(`[INV] Parse failed: ${e.message}`);
     }
   }
-  }
 
   /**
    * Log login info that was captured (before spoofing).
