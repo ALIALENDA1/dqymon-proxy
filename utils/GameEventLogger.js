@@ -15,6 +15,7 @@ class GameEventLogger {
     this.players = new Map(); // netID → { name, country }
     this.lastGems = undefined;  // last known gem count
     this.inventory = new Map(); // itemID → count
+    this.joinHistory = [];
   }
 
   // ── Color stripping ──────────────────────────────────────────────
@@ -253,6 +254,10 @@ class GameEventLogger {
       case "join_request":
         this.currentWorld = pairs.name || "";
         this.players.clear();
+        if (this.currentWorld) {
+          this.joinHistory.push({ name: this.currentWorld, time: Date.now() });
+          if (this.joinHistory.length > 50) this.joinHistory.splice(0, this.joinHistory.length - 50);
+        }
         this.logger.game(`[JOIN] Joining world: ${this.currentWorld}`);
         break;
       case "quit_to_exit":
