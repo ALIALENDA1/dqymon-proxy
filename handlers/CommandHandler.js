@@ -711,7 +711,8 @@ class CommandHandler {
     const gel = this.proxy.gameEventLogger;
     const before = gel.inventory.get(ITEM.DIAMOND_LOCK) || 0;
     this.logger.debug(`[DROP] Before: ${before} DL`);
-    const actionText = `action|drop\n|itemID|${ITEM.DIAMOND_LOCK}\n`;
+    // Build dialog_return packet to mimic manual drop
+    const actionText = `action|dialog_return\ndialog_name|drop_item\nitemID|${ITEM.DIAMOND_LOCK}|\ncount|1`;
     const pkt = this.buildActionPacket(actionText);
     for (let i = 0; i < amount; i++) {
       this.proxy.outgoingClient.send(session.serverNetID, 0, pkt);

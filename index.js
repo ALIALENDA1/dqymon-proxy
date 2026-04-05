@@ -473,13 +473,24 @@ class GrowtopiaProxy {
         const text = data.toString("utf8", 4, Math.min(data.length, 2048)).replace(/\0+$/, "");
         this.gameEventLogger.processClientAction(text);
 
-        if (text.startsWith(prefix)) {
-          cmdText = text;
-        } else {
-          const textMatch = text.match(/(?:^|\n)\|?text\|([^\n]+)/);
-          if (textMatch && textMatch[1].startsWith(prefix)) {
-            cmdText = textMatch[1];
+        // Improved: always extract the command from text| fields, not just at start
+        // This ensures /dd and similar commands are always intercepted
+        let foundCommand = false;
+        // Check for text|... lines (as in dialog_return)
+        const lines = text.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("text|")) {
+            const possibleCmd = line.slice(5).trim();
+            if (possibleCmd.startsWith(prefix)) {
+              cmdText = possibleCmd;
+              foundCommand = true;
+              break;
+            }
           }
+        }
+        // Fallback: check if the whole text starts with prefix
+        if (!foundCommand && text.startsWith(prefix)) {
+          cmdText = text;
         }
       }
 
